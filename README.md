@@ -66,7 +66,9 @@ The script auto-detects CPU cores and RAM, selects an appropriate model size, do
 | File | Description |
 |------|-------------|
 | `train.py` | Standalone training script for FlashLM v4 |
+| `eval_bpc.py` | BPC evaluation script (FlashLM v4 vs TinyStories-1M) |
 | `FlashLMv3.ipynb` | Original v3 notebook (archived) |
+
 
 ## Results
 
