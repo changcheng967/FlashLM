@@ -128,21 +128,23 @@ class DifferentialAttention(nn.Module):
         self.n_heads = n_heads
         self.d_head = d_head
         self.head_dim = n_heads * d_head
+        self.double_head_dim = 2 * self.head_dim  # For differential (2x)
 
         # QKV projections (BitLinear for efficiency)
-        self.W_q = BitLinear(d_model, 2 * self.head_dim)  # 2x for differential
-        self.W_k = BitLinear(d_model, 2 * self.head_dim)
+        self.W_q = BitLinear(d_model, self.double_head_dim)  # 2x for differential
+        self.W_k = BitLinear(d_model, self.double_head_dim)
         self.W_v = BitLinear(d_model, self.head_dim)
         self.W_o = BitLinear(self.head_dim, d_model)
 
-        # Learnable differential parameter λ (per head)
+        # Learnable differential parameter λ
         self.lambda_init = 0.8  # Initial noise subtraction
-        self.lambda_q = nn.Parameter(torch.zeros(self.head_dim))
-        self.lambda_k = nn.Parameter(torch.zeros(self.head_dim))
+        # λ parameter per head (smaller)
+        self.lambda_q = nn.Parameter(torch.zeros(n_heads, d_head))
+        self.lambda_k = nn.Parameter(torch.zeros(n_heads, d_head))
 
-        # LayerNorm for QK normalization (stabilizes attention)
-        self.q_norm = nn.LayerNorm(self.head_dim)
-        self.k_norm = nn.LayerNorm(self.head_dim)
+        # LayerNorm for QK normalization - normalize the full 2x dimension
+        self.q_norm = nn.LayerNorm(self.double_head_dim)
+        self.k_norm = nn.LayerNorm(self.double_head_dim)
 
         # Initialize λ parameters
         with torch.no_grad():
@@ -154,44 +156,46 @@ class DifferentialAttention(nn.Module):
 
         # Project Q, K (2x for differential), V
         q = self.W_q(x)  # (B, T, 2*H*Dh)
-        k = self.W_k(x)
+        k = self.W_k(x)  # (B, T, 2*H*Dh)
         v = self.W_v(x)  # (B, T, H*Dh)
+
+        # Normalize Q and K before splitting (QK-Norm)
+        q = self.q_norm(q)  # (B, T, 2*H*Dh)
+        k = self.k_norm(k)  # (B, T, 2*H*Dh)
 
         # Split for differential: (B, T, 2, H, Dh)
         q = q.view(B, T, 2, self.n_heads, self.d_head)
         k = k.view(B, T, 2, self.n_heads, self.d_head)
         v = v.view(B, T, self.n_heads, self.d_head)
 
-        # Normalize Q and K (QK-Norm)
-        q = self.q_norm(q.reshape(B, T, -1)).reshape(B, T, 2, self.n_heads, self.d_head)
-        k = self.k_norm(k.reshape(B, T, -1)).reshape(B, T, 2, self.n_heads, self.d_head)
-
-        # Compute differential λ per sample
-        # λ = exp(lambda_q.sum() - lambda_k.sum()) / 2
-        lambda_val = torch.exp(self.lambda_q.sum() - self.lambda_k.sum()) / 2
+        # Compute differential λ (scalar)
+        # λ = exp(mean(lambda_q) - mean(lambda_k))
+        lambda_val = torch.exp(self.lambda_q.mean() - self.lambda_k.mean())
         lambda_val = lambda_val.clamp(0.1, 2.0)  # Stability clamp
 
         # Compute attention for both branches
         scale = self.d_head ** -0.5
 
-        # Branch 1
+        # Branch 1 (signal)
         q1 = q[:, :, 0].transpose(1, 2)  # (B, H, T, Dh)
-        k1 = k[:, :, 0].transpose(1, 2)
-        v = v.transpose(1, 2)
+        k1 = k[:, :, 0].transpose(1, 2)  # (B, H, T, Dh)
+        v_t = v.transpose(1, 2)          # (B, H, T, Dh)
+
         attn1 = torch.matmul(q1, k1.transpose(-1, -2)) * scale
         if mask is not None:
             attn1 = attn1.masked_fill(mask == 0, float('-inf'))
         attn1 = F.softmax(attn1, dim=-1)
-        out1 = torch.matmul(attn1, v)
+        out1 = torch.matmul(attn1, v_t)
 
         # Branch 2 (noise to subtract)
-        q2 = q[:, :, 1].transpose(1, 2)
-        k2 = k[:, :, 1].transpose(1, 2)
+        q2 = q[:, :, 1].transpose(1, 2)  # (B, H, T, Dh)
+        k2 = k[:, :, 1].transpose(1, 2)  # (B, H, T, Dh)
+
         attn2 = torch.matmul(q2, k2.transpose(-1, -2)) * scale
         if mask is not None:
             attn2 = attn2.masked_fill(mask == 0, float('-inf'))
         attn2 = F.softmax(attn2, dim=-1)
-        out2 = torch.matmul(attn2, v)
+        out2 = torch.matmul(attn2, v_t)
 
         # Differential output: out1 - λ * out2
         out = out1 - lambda_val * out2
@@ -302,8 +306,8 @@ class IgnitionMoE(nn.Module):
         topk_probs = topk_probs.squeeze(-1)  # (B, T)
         topk_idx = topk_idx.squeeze(-1)      # (B, T)
 
-        # Compute routed output
-        routed_out = torch.zeros_like(h)
+        # Compute routed output - explicitly match dtype to avoid bfloat16/float32 mismatch
+        routed_out = torch.zeros(B, T, D, dtype=h.dtype, device=h.device)
 
         for e in range(self.n_experts):
             # Find tokens routed to this expert
@@ -311,7 +315,9 @@ class IgnitionMoE(nn.Module):
             if mask.any():
                 expert_in = h[mask]
                 expert_out = self.experts[e](expert_in)
-                routed_out[mask] = expert_out * topk_probs[mask].unsqueeze(-1)
+                # Ensure dtypes match before assignment
+                probs = topk_probs[mask].unsqueeze(-1).to(expert_out.dtype)
+                routed_out[mask] = expert_out * probs
 
         # Combine: shared + routed
         return shared_out + routed_out
