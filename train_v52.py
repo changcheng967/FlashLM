@@ -351,32 +351,25 @@ class NovaBlock(nn.Module):
         self.ffn = IgnitionMoE(d_model, expert_dim, n_experts)
         self.ffn_norm = nn.LayerNorm(d_model)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         B, T, D = x.shape
 
         # MoD: Determine which tokens to process
         if self.use_mod and self.training:
             router_probs, topk_mask, indices = self.mod_router(x)
 
-            # Process only top-k tokens through attention
-            # Extract selected tokens
-            selected_x = x[topk_mask]  # (N_selected, D)
-
-            # Pad for batch processing
-            # For simplicity in this implementation, we process all but weight outputs
-            # Full MoD implementation would use sparse operations
-
             # Attention on full sequence (simplified for CPU efficiency)
             h = self.attn_norm(x)
-            attn_out = self.attn(h)
+            attn_out = self.attn(h, mask)
 
-            # Weight by routing probability (soft MoD)
-            attn_out = attn_out * router_probs.unsqueeze(-1)
+            # Weight by routing probability (soft MoD) - ensure dtype match
+            router_weights = router_probs.unsqueeze(-1).to(attn_out.dtype)
+            attn_out = attn_out * router_weights
             x = x + attn_out
         else:
             # Standard attention path
             h = self.attn_norm(x)
-            x = x + self.attn(h)
+            x = x + self.attn(h, mask)
 
         # FFN (Ignition MoE)
         h = self.ffn_norm(x)
@@ -457,11 +450,11 @@ class NovaIgnitionLM(nn.Module):
 
         # Causal mask
         T = x.size(1)
-        mask = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0)
+        mask = torch.tril(torch.ones(T, T, device=x.device, dtype=h.dtype)).unsqueeze(0).unsqueeze(0)
 
         # Transformer blocks
         for block in self.blocks:
-            h = block(h)
+            h = block(h, mask)
 
         # Output projection
         logits = self.head(self.ln_out(h))
@@ -751,12 +744,8 @@ def train():
         mod_capacity=config['mod_capacity'],
     )
 
-    # Compile for CPU efficiency
-    print("⚡ Compiling (reduce-overhead mode)...")
-    try:
-        model = torch.compile(model, mode='reduce-overhead')
-    except Exception as e:
-        print(f"   ⚠️  Compile failed, continuing uncompiled: {e}")
+    # Skip torch.compile on CPU - cudagraphs not supported
+    print("⚡ Running in eager mode (CPU-compatible)")
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -776,13 +765,7 @@ def train():
     if ckpt_path.exists():
         print(f"\n📂 Resuming from {ckpt_path}...")
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-
-        # Handle compiled model state dict
-        state_dict = ckpt['model']
-        if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
-            state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-
-        model.load_state_dict(state_dict, strict=False)
+        model.load_state_dict(ckpt['model'], strict=False)
         optimizer.load_state_dict(ckpt['optimizer'])
         step = ckpt['step']
         tokens_seen = ckpt['tokens']
@@ -859,9 +842,7 @@ def train():
             is_best = m['loss'] < best_val
             if is_best:
                 best_val = m['loss']
-                # Save uncompiled state
-                raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
-                torch.save(raw_model.state_dict(), out_dir / 'best.pt')
+                torch.save(model.state_dict(), out_dir / 'best.pt')
             print(f"  ✦ VAL │ Loss {m['loss']:.4f} │ BPC {m['bpc']:.3f} │ "
                   f"PPL {m['ppl']:.2f}{' ★ BEST' if is_best else ''}")
 
@@ -870,19 +851,17 @@ def train():
             print(f"\n{'─'*50}")
             print(f"📝 Generation (step {step})")
             print(f"{'─'*50}")
-            raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
             for p in prompts[:2]:
-                s = generate_sample(raw_model, tokenizer, p, max_tokens=60)
+                s = generate_sample(model, tokenizer, p, max_tokens=60)
                 print(f"  > {s[:180]}...")
             print(f"{'─'*50}\n")
 
         # Checkpoint
         if step % config['save_every'] == 0:
-            raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
             torch.save({
                 'step': step,
                 'tokens': tokens_seen,
-                'model': raw_model.state_dict(),
+                'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'config': config,
                 'best_val': best_val,
@@ -891,8 +870,7 @@ def train():
 
     # Final evaluation
     m = evaluate(model, val_data, config['seq_len'])
-    raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
-    torch.save(raw_model.state_dict(), out_dir / 'final.pt')
+    torch.save(model.state_dict(), out_dir / 'final.pt')
 
     print(f"\n{'═'*60}")
     print(f"✅ TRAINING COMPLETE")
@@ -909,7 +887,7 @@ def train():
     print(f"\n📝 FINAL GENERATIONS")
     print(f"{'─'*60}")
     for p in prompts:
-        s = generate_sample(raw_model, tokenizer, p, max_tokens=100)
+        s = generate_sample(model, tokenizer, p, max_tokens=100)
         print(f"\n> {p}")
         print(f"  {s}")
     print(f"{'─'*60}")
@@ -917,8 +895,8 @@ def train():
     # Save training info
     info = {
         'model': 'FlashLM v5.2 Nova-Ignition',
-        'params': raw_model._total_params,
-        'bitlinear_params': raw_model._bitlinear_params,
+        'params': model._total_params,
+        'bitlinear_params': model._bitlinear_params,
         'steps': step,
         'tokens_seen': tokens_seen,
         'final_loss': m['loss'],
@@ -959,7 +937,6 @@ def generate_cli():
             sd = torch.load(path, map_location='cpu', weights_only=True)
             if 'model' in sd:
                 sd = sd['model']
-            sd = {k.replace('_orig_mod.', ''): v for k, v in sd.items()}
             model.load_state_dict(sd, strict=False)
             break
     else:
