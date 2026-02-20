@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-FlashLM v5.2 "Nova-Ignition" — State-of-the-Art Efficiency
-===========================================================
-Target: 2 CPU cores, 5GB RAM, 2 hours training
-Goal: Maximum intelligence through architectural innovation
-
-Key Innovations:
-1. BitLinear 1.58b — Ternary weights {-1, 0, +1} for CPU-integer ops
-2. Differential Attention — Noise-canceling attention (Microsoft)
-3. Mixture of Depths (MoD) — Skip 30% of tokens, save compute (DeepMind)
-4. Shared-Expert MoE — 1 shared + 6 routed experts (DeepSeek/Ignition)
-5. μP (Maximal Update Parametrization) — Stable LR transfer
-6. Zero-Copy Mmap DataLoader — Protect 5GB RAM limit
-"""
 
 import os
 import sys
