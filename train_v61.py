@@ -417,8 +417,10 @@ def find_and_prepare_data():
     
     # Search everywhere for text files
     train_txt, val_txt = None, None
-    for d in ["/dataset", "/home/ma-user/data", "/data", "/home/ma-user/work/data",
-              "/cache/dataset", ".", "data", "/home/ma-user/work"]:
+    for d in ["/dataset", "/dataset/TinyStories_V2", "/home/ma-user/data",
+              "/home/ma-user/data/TinyStories_V2", "/data", "/data/TinyStories_V2",
+              "/home/ma-user/work/data", "/home/ma-user/work",
+              "/cache/dataset", "/cache/dataset/TinyStories_V2", ".", "data"]:
         if not os.path.exists(d):
             continue
         for root, _, files in os.walk(d):
