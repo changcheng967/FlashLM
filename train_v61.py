@@ -101,33 +101,69 @@ cfg = Config()
 # ============================================================
 
 def load_tokens(path):
-    """Load and tokenize TinyStories dataset."""
-    # Check what files exist
-    print(f"Dataset contents: {os.listdir(path)[:20]}")
-    
-    # Try to find existing token files first
-    bin_files = glob.glob(os.path.join(path, "*.bin"))
-    npy_files = glob.glob(os.path.join(path, "*.npy"))
-    txt_files = glob.glob(os.path.join(path, "*.txt"))
-    json_files = glob.glob(os.path.join(path, "*.json"))
-    
-    print(f"Found: {len(bin_files)} .bin, {len(npy_files)} .npy, {len(txt_files)} .txt, {len(json_files)} .json")
-    
-    if bin_files:
-        data = np.fromfile(bin_files[0], dtype=np.uint16)
-        print(f"Loaded {len(data):,} tokens from {bin_files[0]}")
-        return data
-    elif npy_files:
-        data = np.load(npy_files[0]).astype(np.uint16)
-        print(f"Loaded {len(data):,} tokens from {npy_files[0]}")
-        return data
-    else:
-        print(f"No pre-tokenized files found. Contents:")
-        for f in sorted(os.listdir(path))[:30]:
-            fp = os.path.join(path, f)
-            sz = os.path.getsize(fp) / 1e6
-            print(f"  {f} ({sz:.1f} MB)")
-        sys.exit(1)
+    """Load TinyStories, train BPE tokenizer, tokenize, return tokens."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import BPE
+    from tokenizers.trainers import BpeTrainer
+    from tokenizers.pre_tokenizers import ByteLevel
+
+    train_file = os.path.join(path, "TinyStoriesV2-GPT4-train.txt")
+    token_bin  = "train_tokens_v61.bin"
+    tok_json   = "tokenizer_v61.json"
+
+    # If already tokenized, just load
+    if os.path.exists(token_bin) and os.path.getsize(token_bin) > 1000:
+        print(f"Loading cached tokens from {token_bin}...")
+        tokens = np.fromfile(token_bin, dtype=np.uint16)
+        print(f"Loaded {len(tokens):,} tokens")
+        return tokens
+
+    # Train BPE tokenizer on first 100MB of text
+    print("Training BPE tokenizer (vocab=4096)...")
+    t0 = time.time()
+
+    tokenizer = Tokenizer(BPE())
+    tokenizer.pre_tokenizer = ByteLevel()
+    tokenizer.train(
+        files=[train_file],
+        trainer=BpeTrainer(
+            vocab_size=cfg.vocab_size,
+            min_frequency=2,
+            special_tokens=["<pad>", "<unk>", "<bos>", "<|eos|>"]
+        )
+    )
+    tokenizer.save(tok_json)
+    print(f"Tokenizer trained in {time.time()-t0:.1f}s, saved to {tok_json}")
+
+    # Tokenize the full training set
+    print("Tokenizing full dataset...")
+    t0 = time.time()
+    eos_id = tokenizer.token_to_id("<|eos|>") or 0
+
+    all_tokens = []
+    with open(train_file, "r", encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+
+    # Split into stories and tokenize
+    stories = text.split("<|endoftext|>")
+    print(f"Found {len(stories):,} stories")
+
+    for i, story in enumerate(stories):
+        story = story.strip()
+        if len(story) < 20:
+            continue
+        ids = tokenizer.encode(story).ids
+        all_tokens.extend(ids)
+        all_tokens.append(eos_id)
+        if (i + 1) % 100000 == 0:
+            print(f"  {i+1:,} stories, {len(all_tokens):,} tokens...")
+
+    tokens = np.array(all_tokens, dtype=np.uint16)
+    tokens.tofile(token_bin)
+    print(f"Tokenized {len(tokens):,} tokens in {time.time()-t0:.1f}s")
+    print(f"Saved to {token_bin} ({os.path.getsize(token_bin)/1e6:.1f} MB)")
+
+    return tokens
 
 def get_batch(tokens, step, cfg):
     """Get a batch of input/target pairs."""
@@ -654,6 +690,14 @@ def train():
         sys.exit(1)
 
     tokens = load_tokens(cfg.data_path)
+
+    # Update vocab size from tokenizer if it exists
+    if os.path.exists("tokenizer_v61.json"):
+        from tokenizers import Tokenizer
+        tok = Tokenizer.from_file("tokenizer_v61.json")
+        cfg.vocab_size = tok.get_vocab_size()
+        print(f"Vocab size: {cfg.vocab_size}")
+
     total_tokens = len(tokens) - 1
     total_steps = total_tokens // cfg.tokens_per_step
     print(f"Total tokens: {total_tokens:,}")
