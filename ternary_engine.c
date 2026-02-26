@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <omp.h>
 
 /* ===== TERNARY MATMUL ===== */
 void ternary_matmul(
@@ -41,45 +42,90 @@ void ternary_matmul(
     }
 }
 
-/* ===== TERNARY-FLOAT WEIGHT GRADIENT: dW = X_ternary.T @ grad_float ===== */
+/* ===== TERNARY WEIGHT GRADIENT: dW = X_ternary.T @ grad_float ===== */
+/* Scatter-add: iterate over M rows, add/sub grad rows into local dW */
+/* X is M x K packed ternary (val, sign), grad is M x N float32 */
+/* Output dW is K x N float32 */
 void ternary_transpose_matmul_f32(
     const uint8_t* X_val, const uint8_t* X_sign,
     const float* grad, float* dW,
     int M, int K, int N
 ) {
     int KB = (K + 7) / 8;
-    memset(dW, 0, (long)K * N * sizeof(float));
+    long KN = (long)K * N;
+    memset(dW, 0, KN * sizeof(float));
 
-    #pragma omp parallel for schedule(static, 4) collapse(2)
-    for (int k = 0; k < K; k++) {
-        for (int n = 0; n < N; n++) {
-            int byte_idx = k / 8;
-            int bit_idx = 7 - (k % 8);
-            uint8_t mask = 1 << bit_idx;
-            float sum = 0.0f;
-            int i = 0;
-            for (; i + 3 < M; i += 4) {
-                uint8_t v0 = X_val[(long)i * KB + byte_idx];
-                uint8_t s0 = X_sign[(long)i * KB + byte_idx];
-                uint8_t v1 = X_val[(long)(i+1) * KB + byte_idx];
-                uint8_t s1 = X_sign[(long)(i+1) * KB + byte_idx];
-                uint8_t v2 = X_val[(long)(i+2) * KB + byte_idx];
-                uint8_t s2 = X_sign[(long)(i+2) * KB + byte_idx];
-                uint8_t v3 = X_val[(long)(i+3) * KB + byte_idx];
-                uint8_t s3 = X_sign[(long)(i+3) * KB + byte_idx];
-                if (v0 & mask) sum += (s0 & mask) ? -grad[(long)i * N + n] : grad[(long)i * N + n];
-                if (v1 & mask) sum += (s1 & mask) ? -grad[(long)(i+1) * N + n] : grad[(long)(i+1) * N + n];
-                if (v2 & mask) sum += (s2 & mask) ? -grad[(long)(i+2) * N + n] : grad[(long)(i+2) * N + n];
-                if (v3 & mask) sum += (s3 & mask) ? -grad[(long)(i+3) * N + n] : grad[(long)(i+3) * N + n];
+    int nthreads = 1;
+    #pragma omp parallel
+    { 
+        #pragma omp single
+        nthreads = omp_get_num_threads();
+    }
+
+    /* Allocate per-thread local dW */
+    float** local_dW = (float**)malloc(nthreads * sizeof(float*));
+    for (int t = 0; t < nthreads; t++) {
+        local_dW[t] = (float*)calloc(KN, sizeof(float));
+    }
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        float* my_dW = local_dW[tid];
+
+        #pragma omp for schedule(static)
+        for (int i = 0; i < M; i++) {
+            const uint8_t* vi = X_val  + (long)i * KB;
+            const uint8_t* si = X_sign + (long)i * KB;
+            const float* gi = grad + (long)i * N;
+
+            for (int k = 0; k < K; k++) {
+                int byte_idx = k / 8;
+                int bit_idx = 7 - (k % 8);
+                uint8_t mask = 1 << bit_idx;
+                uint8_t vb = vi[byte_idx];
+
+                if (!(vb & mask)) continue; /* zero, skip */
+
+                float* dw_row = my_dW + (long)k * N;
+                if (si[byte_idx] & mask) {
+                    /* -1: subtract */
+                    int n = 0;
+                    for (; n + 3 < N; n += 4) {
+                        dw_row[n]   -= gi[n];
+                        dw_row[n+1] -= gi[n+1];
+                        dw_row[n+2] -= gi[n+2];
+                        dw_row[n+3] -= gi[n+3];
+                    }
+                    for (; n < N; n++) dw_row[n] -= gi[n];
+                } else {
+                    /* +1: add */
+                    int n = 0;
+                    for (; n + 3 < N; n += 4) {
+                        dw_row[n]   += gi[n];
+                        dw_row[n+1] += gi[n+1];
+                        dw_row[n+2] += gi[n+2];
+                        dw_row[n+3] += gi[n+3];
+                    }
+                    for (; n < N; n++) dw_row[n] += gi[n];
+                }
             }
-            for (; i < M; i++) {
-                uint8_t v = X_val[(long)i * KB + byte_idx];
-                uint8_t s = X_sign[(long)i * KB + byte_idx];
-                if (v & mask) sum += (s & mask) ? -grad[(long)i * N + n] : grad[(long)i * N + n];
-            }
-            dW[(long)k * N + n] = sum;
         }
     }
+
+    /* Tree reduction: merge local_dW into dW */
+    /* First, parallel reduce pairs */
+    #pragma omp parallel for schedule(static, 1024)
+    for (long idx = 0; idx < KN; idx++) {
+        float sum = 0.0f;
+        for (int t = 0; t < nthreads; t++) {
+            sum += local_dW[t][idx];
+        }
+        dW[idx] = sum;
+    }
+
+    for (int t = 0; t < nthreads; t++) free(local_dW[t]);
+    free(local_dW);
 }
 
 /* ===== SiLU IN-PLACE ===== */
