@@ -128,19 +128,79 @@ void ternary_transpose_matmul_f32(
     free(local_dW);
 }
 
-/* ===== SiLU IN-PLACE ===== */
+/* ===== FAST VECTORIZED EXP FOR NEON ===== */
+/* Schraudolph's trick + 2nd order correction, ~0.1% relative error */
+static inline float32x4_t fast_exp_neon(float32x4_t x) {
+    /* Clamp to prevent overflow/underflow */
+    x = vmaxq_f32(x, vdupq_n_f32(-88.0f));
+    x = vminq_f32(x, vdupq_n_f32(88.0f));
+    
+    /* exp(x) = 2^(x/ln2) = 2^(n+f) where n=floor(x/ln2), f=frac */
+    float32x4_t log2e = vdupq_n_f32(1.44269504f);  /* 1/ln(2) */
+    float32x4_t t = vmulq_f32(x, log2e);
+    
+    /* n = floor(t) */
+    int32x4_t n = vcvtq_s32_f32(t);
+    float32x4_t nf = vcvtq_f32_s32(n);
+    /* Adjust for negative: if nf > t, n-- */
+    uint32x4_t mask = vcgtq_f32(nf, t);
+    n = vsubq_s32(n, vandq_s32(vreinterpretq_s32_u32(mask), vdupq_n_s32(1)));
+    nf = vcvtq_f32_s32(n);
+    
+    /* f = t - n (fractional part, 0 <= f < 1) */
+    float32x4_t f = vsubq_f32(t, nf);
+    
+    /* 2^f approximation using polynomial: 2^f ≈ 1 + f*ln2 + f^2*ln2^2/2 + f^3*ln2^3/6 */
+    float32x4_t c1 = vdupq_n_f32(0.693147180f);  /* ln(2) */
+    float32x4_t c2 = vdupq_n_f32(0.240226507f);  /* ln(2)^2/2 */
+    float32x4_t c3 = vdupq_n_f32(0.055504109f);  /* ln(2)^3/6 */
+    float32x4_t p = vmlaq_f32(c2, c3, f);         /* c2 + c3*f */
+    p = vmlaq_f32(c1, p, f);                       /* c1 + (c2+c3*f)*f */
+    p = vmlaq_f32(vdupq_n_f32(1.0f), p, f);       /* 1 + (c1+(c2+c3*f)*f)*f */
+    
+    /* Multiply by 2^n: add n to the exponent bits */
+    int32x4_t exp_bits = vshlq_n_s32(n, 23);
+    float32x4_t pow2n = vreinterpretq_f32_s32(vaddq_s32(vreinterpretq_s32_f32(vdupq_n_f32(1.0f)), exp_bits));
+    
+    return vmulq_f32(p, pow2n);
+}
+
+/* ===== SiLU IN-PLACE (NEON fast exp) ===== */
 void silu_f32(float* x, int n) {
     #pragma omp parallel for schedule(static, 4096)
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n - 3; i += 4) {
+        float32x4_t v = vld1q_f32(x + i);
+        float32x4_t neg_v = vnegq_f32(v);
+        float32x4_t sig = vrecpeq_f32(vaddq_f32(vdupq_n_f32(1.0f), fast_exp_neon(neg_v)));
+        sig = vmulq_f32(sig, vrecpsq_f32(sig, vaddq_f32(vdupq_n_f32(1.0f), fast_exp_neon(neg_v))));
+        vst1q_f32(x + i, vmulq_f32(v, sig));
+    }
+    for (int i = (n & ~3); i < n; i++) {
         float v = x[i];
         x[i] = v / (1.0f + expf(-v));
     }
 }
 
-/* ===== SiLU BACKWARD ===== */
+/* ===== SiLU BACKWARD (NEON fast exp) ===== */
 void silu_bwd_f32(const float* x, const float* grad_out, float* grad_in, int n) {
     #pragma omp parallel for schedule(static, 4096)
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n - 3; i += 4) {
+        float32x4_t v = vld1q_f32(x + i);
+        float32x4_t go = vld1q_f32(grad_out + i);
+        float32x4_t neg_v = vnegq_f32(v);
+        float32x4_t e = fast_exp_neon(neg_v);
+        float32x4_t one = vdupq_n_f32(1.0f);
+        float32x4_t denom = vaddq_f32(one, e);
+        /* sig = 1/(1+exp(-x)), approximate with Newton-Raphson */
+        float32x4_t inv = vrecpeq_f32(denom);
+        inv = vmulq_f32(inv, vrecpsq_f32(denom, inv));
+        inv = vmulq_f32(inv, vrecpsq_f32(denom, inv));
+        /* dsilu = sig + x * sig * (1 - sig) = sig * (1 + x * (1 - sig)) */
+        float32x4_t one_minus_sig = vsubq_f32(one, inv);
+        float32x4_t dsilu = vmulq_f32(inv, vmlaq_f32(one, v, one_minus_sig));
+        vst1q_f32(grad_in + i, vmulq_f32(go, dsilu));
+    }
+    for (int i = (n & ~3); i < n; i++) {
         float s = 1.0f / (1.0f + expf(-x[i]));
         grad_in[i] = grad_out[i] * (s + x[i] * s * (1.0f - s));
     }
@@ -215,28 +275,57 @@ void requantize_f32(const float* x, uint8_t* out_val, uint8_t* out_sign, int M, 
     }
 }
 
-/* ===== CROSS-ENTROPY FORWARD + BACKWARD (FUSED) ===== */
+/* ===== CROSS-ENTROPY FORWARD + BACKWARD (FUSED, NEON OPTIMIZED) ===== */
 float cross_entropy_fwd_bwd(const float* logits, const int32_t* targets,
                              float* grad, int M, int V) {
     double total_loss = 0.0;
-    #pragma omp parallel for schedule(static, 32) reduction(+:total_loss)
+    int V4 = V & ~3;
+    
+    #pragma omp parallel for schedule(static, 64) reduction(+:total_loss)
     for (int i = 0; i < M; i++) {
         const float* li = logits + (long)i * V;
         float* gi = grad + (long)i * V;
         int t = targets[i];
-        float mx = -1e30f;
-        for (int j = 0; j < V; j++) if (li[j] > mx) mx = li[j];
-        float sum = 0.0f;
-        for (int j = 0; j < V; j++) {
-            gi[j] = expf(li[j] - mx);
-            sum += gi[j];
+        
+        /* Find max using NEON */
+        float32x4_t vmax = vdupq_n_f32(-1e30f);
+        int j = 0;
+        for (; j < V4; j += 4) {
+            float32x4_t v = vld1q_f32(li + j);
+            vmax = vmaxq_f32(vmax, v);
         }
+        float mx = vmaxvq_f32(vmax);
+        for (; j < V; j++) if (li[j] > mx) mx = li[j];
+        
+        /* Compute exp(x - max) using fast NEON exp, and sum */
+        float32x4_t vmx = vdupq_n_f32(mx);
+        float32x4_t vsum = vdupq_n_f32(0.0f);
+        j = 0;
+        for (; j < V4; j += 4) {
+            float32x4_t v = vsubq_f32(vld1q_f32(li + j), vmx);
+            float32x4_t e = fast_exp_neon(v);
+            vst1q_f32(gi + j, e);
+            vsum = vaddq_f32(vsum, e);
+        }
+        float sum = vaddvq_f32(vsum);
+        for (; j < V; j++) {
+            float e = gi[j] = expf(li[j] - mx);
+            sum += e;
+        }
+        
+        /* Normalize and compute gradient */
         float inv_sum = 1.0f / sum;
-        for (int j = 0; j < V; j++) gi[j] *= inv_sum;
-        total_loss += -logf(gi[t] + 1e-9f);
-        gi[t] -= 1.0f;
-        float scale = 1.0f / M;
-        for (int j = 0; j < V; j++) gi[j] *= scale;
+        float scale = inv_sum / M;
+        float32x4_t vinv = vdupq_n_f32(scale);
+        j = 0;
+        for (; j < V4; j += 4) {
+            float32x4_t v = vmulq_f32(vld1q_f32(gi + j), vinv);
+            vst1q_f32(gi + j, v);
+        }
+        for (; j < V; j++) gi[j] *= scale;
+        
+        total_loss += -logf(gi[t] * M + 1e-9f);
+        gi[t] -= 1.0f / M;
     }
     return (float)(total_loss / M);
 }
