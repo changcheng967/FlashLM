@@ -66,7 +66,7 @@ void ternary_matmul(
     }
 }
 
-/* ===== TERNARY WEIGHT GRADIENT (scatter-add) ===== */
+/* ===== TERNARY WEIGHT GRADIENT (scatter-add) with NEON ===== */
 void ternary_transpose_matmul_f32(
     const uint8_t* X_val, const uint8_t* X_sign,
     const float* grad, float* dW,
@@ -107,9 +107,23 @@ void ternary_transpose_matmul_f32(
 
                 float* dw_row = my_dW + (long)k * N;
                 if (si[byte_idx] & mask) {
-                    for (int n = 0; n < N; n++) dw_row[n] -= gi[n];
+                    /* NEON vectorized subtract */
+                    int n = 0;
+                    for (; n + 4 <= N; n += 4) {
+                        float32x4_t dw = vld1q_f32(dw_row + n);
+                        float32x4_t gv = vld1q_f32(gi + n);
+                        vst1q_f32(dw_row + n, vsubq_f32(dw, gv));
+                    }
+                    for (; n < N; n++) dw_row[n] -= gi[n];
                 } else {
-                    for (int n = 0; n < N; n++) dw_row[n] += gi[n];
+                    /* NEON vectorized add */
+                    int n = 0;
+                    for (; n + 4 <= N; n += 4) {
+                        float32x4_t dw = vld1q_f32(dw_row + n);
+                        float32x4_t gv = vld1q_f32(gi + n);
+                        vst1q_f32(dw_row + n, vaddq_f32(dw, gv));
+                    }
+                    for (; n < N; n++) dw_row[n] += gi[n];
                 }
             }
         }
@@ -126,19 +140,21 @@ void ternary_transpose_matmul_f32(
     free(local_dW);
 }
 
-/* ===== SiLU (NEON) ===== */
+/* ===== SiLU (NEON) - single exp, two Newton steps ===== */
 void silu_f32(float* x, int n) {
     #pragma omp parallel for schedule(static, 4096)
     for (int i = 0; i < n - 3; i += 4) {
         float32x4_t v = vld1q_f32(x + i);
         float32x4_t neg_v = vnegq_f32(v);
-        float32x4_t sig = vrecpeq_f32(vaddq_f32(vdupq_n_f32(1.0f), fast_exp_neon(neg_v)));
-        sig = vmulq_f32(sig, vrecpsq_f32(sig, vaddq_f32(vdupq_n_f32(1.0f), fast_exp_neon(neg_v))));
-        vst1q_f32(x + i, vmulq_f32(v, sig));
+        float32x4_t e = fast_exp_neon(neg_v);
+        float32x4_t denom = vaddq_f32(vdupq_n_f32(1.0f), e);
+        float32x4_t inv = vrecpeq_f32(denom);
+        inv = vmulq_f32(inv, vrecpsq_f32(denom, inv));  /* Newton 1 */
+        inv = vmulq_f32(inv, vrecpsq_f32(denom, inv));  /* Newton 2 (reuse denom, no re-exp) */
+        vst1q_f32(x + i, vmulq_f32(v, inv));
     }
     for (int i = (n & ~3); i < n; i++) {
-        float v = x[i];
-        x[i] = v / (1.0f + expf(-v));
+        x[i] = x[i] / (1.0f + expf(-x[i]));
     }
 }
 
@@ -165,28 +181,49 @@ void silu_bwd_f32(const float* x, const float* grad_out, float* grad_in, int n) 
     }
 }
 
-/* ===== RMSNORM FORWARD ===== */
+/* ===== RMSNORM FORWARD (NEON) ===== */
 void rmsnorm_f32(const float* x, const float* gamma, float* out, int M, int D) {
+    int D4 = D & ~3;
     #pragma omp parallel for schedule(static, 32)
     for (int i = 0; i < M; i++) {
         const float* xi = x + (long)i * D;
         float* oi = out + (long)i * D;
-        float sum = 0.0f;
-        for (int j = 0; j < D; j++) sum += xi[j] * xi[j];
+
+        /* NEON vectorized sum of squares */
+        float32x4_t vsum = vdupq_n_f32(0.0f);
+        int j = 0;
+        for (; j < D4; j += 4) {
+            float32x4_t v = vld1q_f32(xi + j);
+            vsum = vmlaq_f32(vsum, v, v);
+        }
+        float sum = vaddvq_f32(vsum);
+        for (; j < D; j++) sum += xi[j] * xi[j];
+
         float scale = 1.0f / sqrtf(sum / D + 1e-6f);
-        for (int j = 0; j < D; j++) oi[j] = xi[j] * scale * gamma[j];
+        float32x4_t vs = vdupq_n_f32(scale);
+
+        /* NEON vectorized scale and gamma multiply */
+        j = 0;
+        for (; j < D4; j += 4) {
+            float32x4_t v = vld1q_f32(xi + j);
+            float32x4_t g = vld1q_f32(gamma + j);
+            vst1q_f32(oi + j, vmulq_f32(vmulq_f32(v, vs), g));
+        }
+        for (; j < D; j++) oi[j] = xi[j] * scale * gamma[j];
     }
 }
 
-/* ===== RMSNORM BACKWARD ===== */
+/* ===== RMSNORM BACKWARD (NEON) ===== */
 void rmsnorm_bwd_f32(const float* x, const float* gamma, const float* grad_out,
                       float* grad_gamma, float* grad_in, int M, int D) {
     /* Zero grad_gamma */
     for (int j = 0; j < D; j++) grad_gamma[j] = 0.0f;
 
+    int D4 = D & ~3;
+
     int nthreads = 1;
     #pragma omp parallel
-    { 
+    {
         #pragma omp single
         nthreads = omp_get_num_threads();
     }
@@ -206,14 +243,53 @@ void rmsnorm_bwd_f32(const float* x, const float* gamma, const float* grad_out,
             const float* xi = x + (long)i * D;
             const float* go = grad_out + (long)i * D;
             float* gi = grad_in + (long)i * D;
-            float sum = 0.0f;
-            for (int j = 0; j < D; j++) sum += xi[j] * xi[j];
+
+            /* NEON vectorized sum of squares */
+            float32x4_t vsum = vdupq_n_f32(0.0f);
+            int j = 0;
+            for (; j < D4; j += 4) {
+                float32x4_t v = vld1q_f32(xi + j);
+                vsum = vmlaq_f32(vsum, v, v);
+            }
+            float sum = vaddvq_f32(vsum);
+            for (; j < D; j++) sum += xi[j] * xi[j];
+
             float rms2 = sum / D + 1e-6f;
             float inv_rms = 1.0f / sqrtf(rms2);
-            float dot = 0.0f;
-            for (int j = 0; j < D; j++) dot += go[j] * gamma[j] * xi[j];
+
+            /* NEON vectorized dot product: go * gamma * xi */
+            float32x4_t vdot = vdupq_n_f32(0.0f);
+            j = 0;
+            for (; j < D4; j += 4) {
+                float32x4_t g = vld1q_f32(gamma + j);
+                float32x4_t go_v = vld1q_f32(go + j);
+                float32x4_t xi_v = vld1q_f32(xi + j);
+                vdot = vmlaq_f32(vdot, vmulq_f32(go_v, g), xi_v);
+            }
+            float dot = vaddvq_f32(vdot);
+            for (; j < D; j++) dot += go[j] * gamma[j] * xi[j];
+
             dot *= inv_rms * inv_rms / D;
-            for (int j = 0; j < D; j++) {
+
+            /* NEON vectorized gradient computation */
+            float32x4_t vinv_rms = vdupq_n_f32(inv_rms);
+            float32x4_t vdot4 = vdupq_n_f32(dot);
+            j = 0;
+            for (; j < D4; j += 4) {
+                float32x4_t go_v = vld1q_f32(go + j);
+                float32x4_t g = vld1q_f32(gamma + j);
+                float32x4_t xi_v = vld1q_f32(xi + j);
+                /* gi = (go * gamma - xi * dot) * inv_rms */
+                float32x4_t term1 = vmulq_f32(go_v, g);
+                float32x4_t term2 = vmulq_f32(xi_v, vdot4);
+                float32x4_t gi_v = vmulq_f32(vsubq_f32(term1, term2), vinv_rms);
+                vst1q_f32(gi + j, gi_v);
+                /* my_gg += go * xi * inv_rms */
+                float32x4_t gg_v = vld1q_f32(my_gg + j);
+                gg_v = vmlaq_f32(gg_v, vmulq_f32(go_v, xi_v), vinv_rms);
+                vst1q_f32(my_gg + j, gg_v);
+            }
+            for (; j < D; j++) {
                 gi[j] = (go[j] * gamma[j] - xi[j] * dot) * inv_rms;
                 my_gg[j] += go[j] * xi[j] * inv_rms;
             }
@@ -232,16 +308,24 @@ void rmsnorm_bwd_f32(const float* x, const float* gamma, const float* grad_out,
     free(local_gg);
 }
 
-/* ===== REQUANTIZE: float32 -> packed ternary ===== */
+/* ===== REQUANTIZE: float32 -> packed ternary (NEON) ===== */
 void requantize_f32(const float* x, uint8_t* out_val, uint8_t* out_sign, int M, int D) {
     int KB = (D + 7) / 8;
+    int D4 = D & ~3;
     #pragma omp parallel for schedule(static, 32)
     for (int i = 0; i < M; i++) {
         const float* xi = x + (long)i * D;
         uint8_t* ov = out_val + (long)i * KB;
         uint8_t* os = out_sign + (long)i * KB;
-        float sum = 0.0f;
-        for (int j = 0; j < D; j++) sum += fabsf(xi[j]);
+
+        /* NEON vectorized fabsf sum */
+        float32x4_t vabs_sum = vdupq_n_f32(0.0f);
+        int j = 0;
+        for (; j < D4; j += 4)
+            vabs_sum = vaddq_f32(vabs_sum, vabsq_f32(vld1q_f32(xi + j)));
+        float sum = vaddvq_f32(vabs_sum);
+        for (; j < D; j++) sum += fabsf(xi[j]);
+
         float thresh = sum / D * 0.6745f;
         memset(ov, 0, KB);
         memset(os, 0, KB);
@@ -326,18 +410,62 @@ void sgd_momentum(float* param, float* grad, float* velocity,
     }
 }
 
-/* ===== FLOAT32 MATMUL: C[M,N] = A[M,K] @ B[K,N] ===== */
+/* ===== TILED FLOAT32 MATMUL with NEON 4x4 micro-kernel ===== */
+/* Tile sizes tuned for Kunpeng 920: L1=64KB, L2=512KB, L3=24MB */
+/* mc*kc*4 should fit in L2 (~512KB), kc*nc*4 should fit in L3 */
 void matmul_f32(const float* A, const float* B, float* C, int M, int K, int N) {
-    #pragma omp parallel for schedule(static, 64)
-    for (int i = 0; i < M; i++) {
-        const float* ai = A + (long)i * K;
-        float* ci = C + (long)i * N;
-        memset(ci, 0, N * sizeof(float));
-        for (int k = 0; k < K; k++) {
-            float a = ai[k];
-            const float* bk = B + (long)k * N;
-            for (int j = 0; j < N; j++) {
-                ci[j] += a * bk[j];
+    const int mc = 128;   /* rows of A tile */
+    const int kc = 192;   /* depth tile (== K for D=192, so single pass) */
+    const int nc = 256;   /* cols of B tile */
+
+    memset(C, 0, (long)M * N * sizeof(float));
+
+    #pragma omp parallel for schedule(dynamic, 1) collapse(2)
+    for (int i0 = 0; i0 < M; i0 += mc) {
+        for (int j0 = 0; j0 < N; j0 += nc) {
+            int iend = (i0 + mc < M) ? i0 + mc : M;
+            int jend = (j0 + nc < N) ? j0 + nc : N;
+
+            for (int k0 = 0; k0 < K; k0 += kc) {
+                int kend = (k0 + kc < K) ? k0 + kc : K;
+
+                for (int i = i0; i < iend; i += 4) {
+                    int ilim = (i + 4 < iend) ? i + 4 : iend;
+                    for (int j = j0; j < jend; j += 4) {
+                        int jlim = (j + 4 < jend) ? j + 4 : jend;
+
+                        /* 4x4 micro-kernel with NEON */
+                        if (ilim - i == 4 && jlim - j == 4) {
+                            float32x4_t c0 = vld1q_f32(C + (long)i * N + j);
+                            float32x4_t c1 = vld1q_f32(C + (long)(i+1) * N + j);
+                            float32x4_t c2 = vld1q_f32(C + (long)(i+2) * N + j);
+                            float32x4_t c3 = vld1q_f32(C + (long)(i+3) * N + j);
+
+                            for (int k = k0; k < kend; k++) {
+                                float32x4_t bk = vld1q_f32(B + (long)k * N + j);
+                                c0 = vmlaq_n_f32(c0, bk, A[(long)i * K + k]);
+                                c1 = vmlaq_n_f32(c1, bk, A[(long)(i+1) * K + k]);
+                                c2 = vmlaq_n_f32(c2, bk, A[(long)(i+2) * K + k]);
+                                c3 = vmlaq_n_f32(c3, bk, A[(long)(i+3) * K + k]);
+                            }
+
+                            vst1q_f32(C + (long)i * N + j, c0);
+                            vst1q_f32(C + (long)(i+1) * N + j, c1);
+                            vst1q_f32(C + (long)(i+2) * N + j, c2);
+                            vst1q_f32(C + (long)(i+3) * N + j, c3);
+                        } else {
+                            /* Scalar fallback for edges */
+                            for (int ii = i; ii < ilim; ii++) {
+                                for (int k = k0; k < kend; k++) {
+                                    float a = A[(long)ii * K + k];
+                                    for (int jj = j; jj < jlim; jj++) {
+                                        C[(long)ii * N + jj] += a * B[(long)k * N + jj];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -484,16 +612,47 @@ void embed_lookup(const float* embed, const int32_t* ids, float* out, int M, int
     }
 }
 
-/* ===== EMBEDDING GRADIENT SCATTER ===== */
+/* ===== EMBEDDING GRADIENT SCATTER (parallel with thread-local reduce) ===== */
 /* d_embed[ids[i]] += dx[i] for each i */
 void embed_grad_scatter(float* d_embed, const int32_t* ids, const float* dx, int M, int D) {
-    /* Serial to avoid race conditions on same token ids */
-    for (int i = 0; i < M; i++) {
-        int id = ids[i];
-        float* dst = d_embed + (long)id * D;
-        const float* src = dx + (long)i * D;
-        for (int d = 0; d < D; d++) dst[d] += src[d];
+    int nthreads = 1;
+    #pragma omp parallel
+    {
+        #pragma omp single
+        nthreads = omp_get_num_threads();
     }
+
+    /* With V=1024, D=192 → 768 KB per copy, manageable */
+    const int V = 1024;
+    float** local_de = (float**)malloc(nthreads * sizeof(float*));
+    for (int t = 0; t < nthreads; t++) {
+        local_de[t] = (float*)calloc((long)V * D, sizeof(float));
+    }
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        float* my_de = local_de[tid];
+        #pragma omp for schedule(static, 256)
+        for (int i = 0; i < M; i++) {
+            int id = ids[i];
+            const float* src = dx + (long)i * D;
+            float* dst = my_de + (long)id * D;
+            for (int d = 0; d < D; d++) dst[d] += src[d];
+        }
+    }
+
+    /* Reduce to global d_embed */
+    long VD = (long)V * D;
+    #pragma omp parallel for schedule(static, 1024)
+    for (long idx = 0; idx < VD; idx++) {
+        float sum = 0.0f;
+        for (int t = 0; t < nthreads; t++) sum += local_de[t][idx];
+        d_embed[idx] += sum;
+    }
+
+    for (int t = 0; t < nthreads; t++) free(local_de[t]);
+    free(local_de);
 }
 
 /* ===== WEIGHT QUANTIZE: float32 shadow -> packed ternary ===== */
