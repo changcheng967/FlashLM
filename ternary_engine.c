@@ -1,136 +1,35 @@
-/*
- * ternary_engine.c — FlashLM NEON/AVX2 Cross-Platform Training Engine
- * 
- * ARM aarch64: uses NEON intrinsics (vandq_u8, vcntq_u8, etc.)
- * x86_64:      uses AVX2 + POPCNT (or vpshufb nibble lookup)
- * 
- * Compile:
- *   ARM:  gcc -O3 -march=armv8-a+simd -fopenmp -shared -fPIC -lm -o ternary_engine.so ternary_engine.c
- *   x86:  gcc -O3 -march=native -mavx2 -mpopcnt -fopenmp -shared -fPIC -lm -o ternary_engine.so ternary_engine.c
- */
-
+#include <arm_neon.h>
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
 #include <omp.h>
 
-#ifdef __aarch64__
-  #include <arm_neon.h>
-#elif defined(__x86_64__) || defined(_M_X64)
-  #include <immintrin.h>
-  #include <x86intrin.h>
-#endif
-
-/* ================================================================
- * HELPER: POPCOUNT for x86 AVX2
- * Nibble-lookup method — works on all AVX2 CPUs (Haswell+, Zen 1+)
- * ================================================================ */
-#if defined(__x86_64__) || defined(_M_X64)
-
-static inline __m256i avx2_popcount_u8(__m256i v) {
-    /* Nibble lookup table: popcount of 0..15 */
-    const __m256i lookup = _mm256_setr_epi8(
-        0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4,
-        0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
-    );
-    __m256i low_mask = _mm256_set1_epi8(0x0F);
-    __m256i lo = _mm256_and_si256(v, low_mask);
-    __m256i hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), low_mask);
-    return _mm256_add_epi8(
-        _mm256_shuffle_epi8(lookup, lo),
-        _mm256_shuffle_epi8(lookup, hi)
-    );
-}
-
-/* Sum all bytes in a __m256i, return as int32 */
-static inline int32_t avx2_sum_u8(__m256i v) {
-    /* sad against zero gives 4x uint64 partial sums */
-    __m256i sad = _mm256_sad_epu8(v, _mm256_setzero_si256());
-    /* Extract and sum the 4 x 64-bit values */
-    __m128i lo = _mm256_castsi256_si128(sad);
-    __m128i hi = _mm256_extracti128_si256(sad, 1);
-    __m128i sum = _mm_add_epi64(lo, hi);
-    return (int32_t)(_mm_extract_epi64(sum, 0) + _mm_extract_epi64(sum, 1));
-}
-
-/* Fast exp for x86 AVX2 — Schraudolph + polynomial */
-static inline __m256 fast_exp_avx2(__m256 x) {
-    x = _mm256_max_ps(x, _mm256_set1_ps(-88.0f));
-    x = _mm256_min_ps(x, _mm256_set1_ps(88.0f));
-    
-    __m256 log2e = _mm256_set1_ps(1.44269504f);
-    __m256 t = _mm256_mul_ps(x, log2e);
-    
-    /* n = floor(t) */
-    __m256 nf = _mm256_floor_ps(t);
-    __m256i n = _mm256_cvtps_epi32(nf);
-    
-    /* f = t - n */
-    __m256 f = _mm256_sub_ps(t, nf);
-    
-    /* 2^f polynomial: 1 + f*ln2 + f^2*ln2^2/2 + f^3*ln2^3/6 */
-    __m256 c1 = _mm256_set1_ps(0.693147180f);
-    __m256 c2 = _mm256_set1_ps(0.240226507f);
-    __m256 c3 = _mm256_set1_ps(0.055504109f);
-    __m256 p = _mm256_fmadd_ps(c3, f, c2);
-    p = _mm256_fmadd_ps(p, f, c1);
-    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(1.0f));
-    
-    /* Multiply by 2^n */
-    __m256i exp_bits = _mm256_slli_epi32(n, 23);
-    __m256 pow2n = _mm256_castsi256_ps(
-        _mm256_add_epi32(_mm256_castps_si256(_mm256_set1_ps(1.0f)), exp_bits)
-    );
-    
-    return _mm256_mul_ps(p, pow2n);
-}
-
-#endif /* x86_64 */
-
-
-/* ================================================================
- * FAST EXP for ARM NEON
- * ================================================================ */
-#ifdef __aarch64__
-
+/* ===== FAST EXP (NEON) ===== */
 static inline float32x4_t fast_exp_neon(float32x4_t x) {
     x = vmaxq_f32(x, vdupq_n_f32(-88.0f));
     x = vminq_f32(x, vdupq_n_f32(88.0f));
-    
     float32x4_t log2e = vdupq_n_f32(1.44269504f);
     float32x4_t t = vmulq_f32(x, log2e);
-    
     int32x4_t n = vcvtq_s32_f32(t);
     float32x4_t nf = vcvtq_f32_s32(n);
     uint32x4_t mask = vcgtq_f32(nf, t);
     n = vsubq_s32(n, vandq_s32(vreinterpretq_s32_u32(mask), vdupq_n_s32(1)));
     nf = vcvtq_f32_s32(n);
-    
     float32x4_t f = vsubq_f32(t, nf);
-    
     float32x4_t c1 = vdupq_n_f32(0.693147180f);
     float32x4_t c2 = vdupq_n_f32(0.240226507f);
     float32x4_t c3 = vdupq_n_f32(0.055504109f);
     float32x4_t p = vmlaq_f32(c2, c3, f);
     p = vmlaq_f32(c1, p, f);
     p = vmlaq_f32(vdupq_n_f32(1.0f), p, f);
-    
     int32x4_t exp_bits = vshlq_n_s32(n, 23);
     float32x4_t pow2n = vreinterpretq_f32_s32(
-        vaddq_s32(vreinterpretq_s32_f32(vdupq_n_f32(1.0f)), exp_bits)
-    );
-    
+        vaddq_s32(vreinterpretq_s32_f32(vdupq_n_f32(1.0f)), exp_bits));
     return vmulq_f32(p, pow2n);
 }
 
-#endif /* aarch64 */
-
-
-/* ================================================================
- * TERNARY MATMUL: C = X_ternary @ W_ternary.T
- * X: M x KB (packed), W: N x KB (packed), C: M x N (int32)
- * ================================================================ */
+/* ===== TERNARY MATMUL (NEON popcount) ===== */
 void ternary_matmul(
     const uint8_t* X_val, const uint8_t* X_sign,
     const uint8_t* W_val, const uint8_t* W_sign,
@@ -147,8 +46,6 @@ void ternary_matmul(
         const uint8_t* wj_s = W_sign + (long)j * KB;
         int32_t ps = 0, ns = 0;
         int k = 0;
-
-#ifdef __aarch64__
         for (; k + 16 <= KB; k += 16) {
             uint8x16_t xv = vld1q_u8(xi_v + k);
             uint8x16_t xs = vld1q_u8(xi_s + k);
@@ -159,19 +56,6 @@ void ternary_matmul(
             ps += vaddvq_u16(vpaddlq_u8(vcntq_u8(bv)));
             ns += vaddvq_u16(vpaddlq_u8(vcntq_u8(bs)));
         }
-#elif defined(__x86_64__)
-        for (; k + 32 <= KB; k += 32) {
-            __m256i xv = _mm256_loadu_si256((__m256i*)(xi_v + k));
-            __m256i xs = _mm256_loadu_si256((__m256i*)(xi_s + k));
-            __m256i wv = _mm256_loadu_si256((__m256i*)(wj_v + k));
-            __m256i ws = _mm256_loadu_si256((__m256i*)(wj_s + k));
-            __m256i bv = _mm256_and_si256(xv, wv);
-            __m256i bs = _mm256_and_si256(_mm256_xor_si256(xs, ws), bv);
-            ps += avx2_sum_u8(avx2_popcount_u8(bv));
-            ns += avx2_sum_u8(avx2_popcount_u8(bs));
-        }
-#endif
-        /* Scalar fallback for remaining bytes */
         for (; k < KB; k++) {
             uint8_t bv = xi_v[k] & wj_v[k];
             uint8_t bs = (xi_s[k] ^ wj_s[k]) & bv;
@@ -182,11 +66,7 @@ void ternary_matmul(
     }
 }
 
-
-/* ================================================================
- * TERNARY WEIGHT GRADIENT: dW = X_ternary.T @ grad_float
- * Scatter-add with per-thread local buffers
- * ================================================================ */
+/* ===== TERNARY WEIGHT GRADIENT (scatter-add) ===== */
 void ternary_transpose_matmul_f32(
     const uint8_t* X_val, const uint8_t* X_sign,
     const float* grad, float* dW,
@@ -223,29 +103,13 @@ void ternary_transpose_matmul_f32(
                 int byte_idx = k / 8;
                 int bit_idx = 7 - (k % 8);
                 uint8_t mask = 1 << bit_idx;
-                uint8_t vb = vi[byte_idx];
-
-                if (!(vb & mask)) continue;
+                if (!(vi[byte_idx] & mask)) continue;
 
                 float* dw_row = my_dW + (long)k * N;
                 if (si[byte_idx] & mask) {
-                    int n = 0;
-                    for (; n + 3 < N; n += 4) {
-                        dw_row[n]   -= gi[n];
-                        dw_row[n+1] -= gi[n+1];
-                        dw_row[n+2] -= gi[n+2];
-                        dw_row[n+3] -= gi[n+3];
-                    }
-                    for (; n < N; n++) dw_row[n] -= gi[n];
+                    for (int n = 0; n < N; n++) dw_row[n] -= gi[n];
                 } else {
-                    int n = 0;
-                    for (; n + 3 < N; n += 4) {
-                        dw_row[n]   += gi[n];
-                        dw_row[n+1] += gi[n+1];
-                        dw_row[n+2] += gi[n+2];
-                        dw_row[n+3] += gi[n+3];
-                    }
-                    for (; n < N; n++) dw_row[n] += gi[n];
+                    for (int n = 0; n < N; n++) dw_row[n] += gi[n];
                 }
             }
         }
@@ -254,9 +118,7 @@ void ternary_transpose_matmul_f32(
     #pragma omp parallel for schedule(static, 1024)
     for (long idx = 0; idx < KN; idx++) {
         float sum = 0.0f;
-        for (int t = 0; t < nthreads; t++) {
-            sum += local_dW[t][idx];
-        }
+        for (int t = 0; t < nthreads; t++) sum += local_dW[t][idx];
         dW[idx] = sum;
     }
 
@@ -264,12 +126,8 @@ void ternary_transpose_matmul_f32(
     free(local_dW);
 }
 
-
-/* ================================================================
- * SiLU IN-PLACE
- * ================================================================ */
+/* ===== SiLU (NEON) ===== */
 void silu_f32(float* x, int n) {
-#ifdef __aarch64__
     #pragma omp parallel for schedule(static, 4096)
     for (int i = 0; i < n - 3; i += 4) {
         float32x4_t v = vld1q_f32(x + i);
@@ -282,35 +140,10 @@ void silu_f32(float* x, int n) {
         float v = x[i];
         x[i] = v / (1.0f + expf(-v));
     }
-#elif defined(__x86_64__)
-    #pragma omp parallel for schedule(static, 4096)
-    for (int i = 0; i < n - 7; i += 8) {
-        __m256 v = _mm256_loadu_ps(x + i);
-        __m256 neg_v = _mm256_sub_ps(_mm256_setzero_ps(), v);
-        __m256 e = fast_exp_avx2(neg_v);
-        __m256 denom = _mm256_add_ps(_mm256_set1_ps(1.0f), e);
-        __m256 sig = _mm256_div_ps(_mm256_set1_ps(1.0f), denom);
-        _mm256_storeu_ps(x + i, _mm256_mul_ps(v, sig));
-    }
-    for (int i = (n & ~7); i < n; i++) {
-        float v = x[i];
-        x[i] = v / (1.0f + expf(-v));
-    }
-#else
-    #pragma omp parallel for schedule(static, 4096)
-    for (int i = 0; i < n; i++) {
-        float v = x[i];
-        x[i] = v / (1.0f + expf(-v));
-    }
-#endif
 }
 
-
-/* ================================================================
- * SiLU BACKWARD
- * ================================================================ */
+/* ===== SiLU BACKWARD (NEON) ===== */
 void silu_bwd_f32(const float* x, const float* grad_out, float* grad_in, int n) {
-#ifdef __aarch64__
     #pragma omp parallel for schedule(static, 4096)
     for (int i = 0; i < n - 3; i += 4) {
         float32x4_t v = vld1q_f32(x + i);
@@ -330,38 +163,9 @@ void silu_bwd_f32(const float* x, const float* grad_out, float* grad_in, int n) 
         float s = 1.0f / (1.0f + expf(-x[i]));
         grad_in[i] = grad_out[i] * (s + x[i] * s * (1.0f - s));
     }
-#elif defined(__x86_64__)
-    __m256 one = _mm256_set1_ps(1.0f);
-    #pragma omp parallel for schedule(static, 4096)
-    for (int i = 0; i < n - 7; i += 8) {
-        __m256 v = _mm256_loadu_ps(x + i);
-        __m256 go = _mm256_loadu_ps(grad_out + i);
-        __m256 neg_v = _mm256_sub_ps(_mm256_setzero_ps(), v);
-        __m256 e = fast_exp_avx2(neg_v);
-        __m256 denom = _mm256_add_ps(one, e);
-        __m256 sig = _mm256_div_ps(one, denom);
-        __m256 one_minus_sig = _mm256_sub_ps(one, sig);
-        /* dsilu = sig * (1 + x * (1 - sig)) */
-        __m256 dsilu = _mm256_mul_ps(sig, _mm256_fmadd_ps(v, one_minus_sig, one));
-        _mm256_storeu_ps(grad_in + i, _mm256_mul_ps(go, dsilu));
-    }
-    for (int i = (n & ~7); i < n; i++) {
-        float s = 1.0f / (1.0f + expf(-x[i]));
-        grad_in[i] = grad_out[i] * (s + x[i] * s * (1.0f - s));
-    }
-#else
-    #pragma omp parallel for schedule(static, 4096)
-    for (int i = 0; i < n; i++) {
-        float s = 1.0f / (1.0f + expf(-x[i]));
-        grad_in[i] = grad_out[i] * (s + x[i] * s * (1.0f - s));
-    }
-#endif
 }
 
-
-/* ================================================================
- * RMSNORM FORWARD
- * ================================================================ */
+/* ===== RMSNORM FORWARD ===== */
 void rmsnorm_f32(const float* x, const float* gamma, float* out, int M, int D) {
     #pragma omp parallel for schedule(static, 32)
     for (int i = 0; i < M; i++) {
@@ -374,17 +178,29 @@ void rmsnorm_f32(const float* x, const float* gamma, float* out, int M, int D) {
     }
 }
 
-
-/* ================================================================
- * RMSNORM BACKWARD
- * ================================================================ */
+/* ===== RMSNORM BACKWARD ===== */
 void rmsnorm_bwd_f32(const float* x, const float* gamma, const float* grad_out,
                       float* grad_gamma, float* grad_in, int M, int D) {
-    memset(grad_gamma, 0, D * sizeof(float));
+    /* Zero grad_gamma */
+    for (int j = 0; j < D; j++) grad_gamma[j] = 0.0f;
+
+    int nthreads = 1;
+    #pragma omp parallel
+    { 
+        #pragma omp single
+        nthreads = omp_get_num_threads();
+    }
+
+    float** local_gg = (float**)malloc(nthreads * sizeof(float*));
+    for (int t = 0; t < nthreads; t++) {
+        local_gg[t] = (float*)calloc(D, sizeof(float));
+    }
 
     #pragma omp parallel
     {
-        float* local_gg = (float*)calloc(D, sizeof(float));
+        int tid = omp_get_thread_num();
+        float* my_gg = local_gg[tid];
+
         #pragma omp for schedule(static, 32)
         for (int i = 0; i < M; i++) {
             const float* xi = x + (long)i * D;
@@ -399,19 +215,24 @@ void rmsnorm_bwd_f32(const float* x, const float* gamma, const float* grad_out,
             dot *= inv_rms * inv_rms / D;
             for (int j = 0; j < D; j++) {
                 gi[j] = (go[j] * gamma[j] - xi[j] * dot) * inv_rms;
-                local_gg[j] += go[j] * xi[j] * inv_rms;
+                my_gg[j] += go[j] * xi[j] * inv_rms;
             }
         }
-        #pragma omp critical
-        for (int j = 0; j < D; j++) grad_gamma[j] += local_gg[j];
-        free(local_gg);
     }
+
+    /* Reduce grad_gamma */
+    #pragma omp parallel for schedule(static)
+    for (int j = 0; j < D; j++) {
+        float sum = 0.0f;
+        for (int t = 0; t < nthreads; t++) sum += local_gg[t][j];
+        grad_gamma[j] = sum;
+    }
+
+    for (int t = 0; t < nthreads; t++) free(local_gg[t]);
+    free(local_gg);
 }
 
-
-/* ================================================================
- * REQUANTIZE: float32 -> packed ternary
- * ================================================================ */
+/* ===== REQUANTIZE: float32 -> packed ternary ===== */
 void requantize_f32(const float* x, uint8_t* out_val, uint8_t* out_sign, int M, int D) {
     int KB = (D + 7) / 8;
     #pragma omp parallel for schedule(static, 32)
@@ -436,30 +257,24 @@ void requantize_f32(const float* x, uint8_t* out_val, uint8_t* out_sign, int M, 
     }
 }
 
-
-/* ================================================================
- * CROSS-ENTROPY FORWARD + BACKWARD (FUSED)
- * ================================================================ */
+/* ===== CROSS-ENTROPY FORWARD+BACKWARD (NEON) ===== */
 float cross_entropy_fwd_bwd(const float* logits, const int32_t* targets,
                              float* grad, int M, int V) {
     double total_loss = 0.0;
-
-#ifdef __aarch64__
     int V4 = V & ~3;
+
     #pragma omp parallel for schedule(static, 64) reduction(+:total_loss)
     for (int i = 0; i < M; i++) {
         const float* li = logits + (long)i * V;
         float* gi = grad + (long)i * V;
         int t = targets[i];
-        
+
         float32x4_t vmax = vdupq_n_f32(-1e30f);
         int j = 0;
-        for (; j < V4; j += 4) {
-            vmax = vmaxq_f32(vmax, vld1q_f32(li + j));
-        }
+        for (; j < V4; j += 4) vmax = vmaxq_f32(vmax, vld1q_f32(li + j));
         float mx = vmaxvq_f32(vmax);
         for (; j < V; j++) if (li[j] > mx) mx = li[j];
-        
+
         float32x4_t vmx = vdupq_n_f32(mx);
         float32x4_t vsum = vdupq_n_f32(0.0f);
         j = 0;
@@ -470,103 +285,26 @@ float cross_entropy_fwd_bwd(const float* logits, const int32_t* targets,
         }
         float sum = vaddvq_f32(vsum);
         for (; j < V; j++) { float e = expf(li[j] - mx); gi[j] = e; sum += e; }
-        
+
         float scale = 1.0f / (sum * M);
         float32x4_t vs = vdupq_n_f32(scale);
         j = 0;
         for (; j < V4; j += 4) vst1q_f32(gi + j, vmulq_f32(vld1q_f32(gi + j), vs));
         for (; j < V; j++) gi[j] *= scale;
-        
+
         total_loss += -logf(gi[t] * M + 1e-9f);
         gi[t] -= 1.0f / M;
     }
-
-#elif defined(__x86_64__)
-    int V8 = V & ~7;
-    #pragma omp parallel for schedule(static, 64) reduction(+:total_loss)
-    for (int i = 0; i < M; i++) {
-        const float* li = logits + (long)i * V;
-        float* gi = grad + (long)i * V;
-        int t = targets[i];
-        
-        /* Find max */
-        __m256 vmax = _mm256_set1_ps(-1e30f);
-        int j = 0;
-        for (; j < V8; j += 8) {
-            vmax = _mm256_max_ps(vmax, _mm256_loadu_ps(li + j));
-        }
-        /* Horizontal max of 8 floats */
-        __m128 hi128 = _mm256_extractf128_ps(vmax, 1);
-        __m128 lo128 = _mm256_castps256_ps128(vmax);
-        __m128 m128 = _mm_max_ps(lo128, hi128);
-        m128 = _mm_max_ps(m128, _mm_movehl_ps(m128, m128));
-        m128 = _mm_max_ss(m128, _mm_movehdup_ps(m128));
-        float mx = _mm_cvtss_f32(m128);
-        for (; j < V; j++) if (li[j] > mx) mx = li[j];
-        
-        /* exp(x - max) and sum */
-        __m256 vmx = _mm256_set1_ps(mx);
-        __m256 vsum = _mm256_setzero_ps();
-        j = 0;
-        for (; j < V8; j += 8) {
-            __m256 e = fast_exp_avx2(_mm256_sub_ps(_mm256_loadu_ps(li + j), vmx));
-            _mm256_storeu_ps(gi + j, e);
-            vsum = _mm256_add_ps(vsum, e);
-        }
-        /* Horizontal sum */
-        __m128 s128 = _mm_add_ps(_mm256_castps256_ps128(vsum), _mm256_extractf128_ps(vsum, 1));
-        s128 = _mm_add_ps(s128, _mm_movehl_ps(s128, s128));
-        s128 = _mm_add_ss(s128, _mm_movehdup_ps(s128));
-        float sum = _mm_cvtss_f32(s128);
-        for (; j < V; j++) { float e = expf(li[j] - mx); gi[j] = e; sum += e; }
-        
-        /* Normalize */
-        float scale = 1.0f / (sum * M);
-        __m256 vs = _mm256_set1_ps(scale);
-        j = 0;
-        for (; j < V8; j += 8) _mm256_storeu_ps(gi + j, _mm256_mul_ps(_mm256_loadu_ps(gi + j), vs));
-        for (; j < V; j++) gi[j] *= scale;
-        
-        total_loss += -logf(gi[t] * M + 1e-9f);
-        gi[t] -= 1.0f / M;
-    }
-
-#else
-    /* Pure scalar fallback */
-    #pragma omp parallel for schedule(static, 64) reduction(+:total_loss)
-    for (int i = 0; i < M; i++) {
-        const float* li = logits + (long)i * V;
-        float* gi = grad + (long)i * V;
-        int t = targets[i];
-        float mx = li[0];
-        for (int j = 1; j < V; j++) if (li[j] > mx) mx = li[j];
-        float sum = 0.0f;
-        for (int j = 0; j < V; j++) { float e = expf(li[j] - mx); gi[j] = e; sum += e; }
-        float scale = 1.0f / (sum * M);
-        for (int j = 0; j < V; j++) gi[j] *= scale;
-        total_loss += -logf(gi[t] * M + 1e-9f);
-        gi[t] -= 1.0f / M;
-    }
-#endif
-
     return (float)(total_loss / M);
 }
 
-
-/* ================================================================
- * INT32 TO FLOAT32
- * ================================================================ */
-void int32_to_float32(const int32_t* src, float* dst, int n) {
+/* ===== INT32 TO FLOAT32 ===== */
+void int32_to_float32(const int32_t* src, float* dst, int n, float scale) {
     #pragma omp parallel for schedule(static, 4096)
-    for (int i = 0; i < n; i++) {
-        dst[i] = (float)src[i];
-    }
+    for (int i = 0; i < n; i++) dst[i] = (float)src[i] * scale;
 }
 
-
-/* ================================================================
- * ELEMENT-WISE OPS
- * ================================================================ */
+/* ===== ELEMENT-WISE OPS ===== */
 void add_f32(const float* a, const float* b, float* out, int n) {
     #pragma omp parallel for schedule(static, 4096)
     for (int i = 0; i < n; i++) out[i] = a[i] + b[i];
@@ -577,10 +315,7 @@ void mul_f32(const float* a, const float* b, float* out, int n) {
     for (int i = 0; i < n; i++) out[i] = a[i] * b[i];
 }
 
-
-/* ================================================================
- * SGD WITH MOMENTUM
- * ================================================================ */
+/* ===== SGD WITH MOMENTUM ===== */
 void sgd_momentum(float* param, float* grad, float* velocity,
                    int n, float lr, float momentum, float wd) {
     #pragma omp parallel for schedule(static, 4096)
@@ -588,5 +323,232 @@ void sgd_momentum(float* param, float* grad, float* velocity,
         grad[i] += wd * param[i];
         velocity[i] = momentum * velocity[i] + grad[i];
         param[i] -= lr * velocity[i];
+    }
+}
+
+/* ===== FLOAT32 MATMUL: C[M,N] = A[M,K] @ B[K,N] ===== */
+void matmul_f32(const float* A, const float* B, float* C, int M, int K, int N) {
+    #pragma omp parallel for schedule(static, 64)
+    for (int i = 0; i < M; i++) {
+        const float* ai = A + (long)i * K;
+        float* ci = C + (long)i * N;
+        memset(ci, 0, N * sizeof(float));
+        for (int k = 0; k < K; k++) {
+            float a = ai[k];
+            const float* bk = B + (long)k * N;
+            for (int j = 0; j < N; j++) {
+                ci[j] += a * bk[j];
+            }
+        }
+    }
+}
+
+/* ===== MATMUL A.T @ B: C[K,N] = A[M,K].T @ B[M,N] ===== */
+void matmul_atb_f32(const float* A, const float* B, float* C, int M, int K, int N) {
+    long KN = (long)K * N;
+    int nthreads = 1;
+    #pragma omp parallel
+    {
+        #pragma omp single
+        nthreads = omp_get_num_threads();
+    }
+
+    float** local_C = (float**)malloc(nthreads * sizeof(float*));
+    for (int t = 0; t < nthreads; t++) {
+        local_C[t] = (float*)calloc(KN, sizeof(float));
+    }
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        float* my_C = local_C[tid];
+
+        #pragma omp for schedule(static, 256)
+        for (int i = 0; i < M; i++) {
+            const float* ai = A + (long)i * K;
+            const float* bi = B + (long)i * N;
+            for (int k = 0; k < K; k++) {
+                float a = ai[k];
+                float* ck = my_C + (long)k * N;
+                for (int j = 0; j < N; j++) {
+                    ck[j] += a * bi[j];
+                }
+            }
+        }
+    }
+
+    #pragma omp parallel for schedule(static, 1024)
+    for (long idx = 0; idx < KN; idx++) {
+        float sum = 0.0f;
+        for (int t = 0; t < nthreads; t++) sum += local_C[t][idx];
+        C[idx] = sum;
+    }
+
+    for (int t = 0; t < nthreads; t++) free(local_C[t]);
+    free(local_C);
+}
+
+/* ===== FUSED CE + EMBED BACKWARD ===== */
+/* Computes loss, dx = ce_softmax_grad @ embed, d_embed += ce_softmax_grad.T @ x_final */
+/* Processes row-by-row so we never store full (M,V) gradient */
+void cross_entropy_bwd_fused(
+    const float* logits,    /* M x V */
+    const int32_t* targets, /* M */
+    const float* x_final,   /* M x D */
+    const float* embed,     /* V x D */
+    float* dx,              /* M x D output */
+    float* d_embed,         /* V x D output (accumulated) */
+    float* loss_out,        /* scalar output */
+    int M, int V, int D
+) {
+    memset(dx, 0, (long)M * D * sizeof(float));
+    double total_loss = 0.0;
+
+    int nthreads = 1;
+    #pragma omp parallel
+    {
+        #pragma omp single
+        nthreads = omp_get_num_threads();
+    }
+
+    float** local_de = (float**)malloc(nthreads * sizeof(float*));
+    for (int t = 0; t < nthreads; t++) {
+        local_de[t] = (float*)calloc((long)V * D, sizeof(float));
+    }
+
+    #pragma omp parallel reduction(+:total_loss)
+    {
+        int tid = omp_get_thread_num();
+        float* my_de = local_de[tid];
+        float* probs = (float*)malloc(V * sizeof(float));
+
+        #pragma omp for schedule(static, 64)
+        for (int i = 0; i < M; i++) {
+            const float* li = logits + (long)i * V;
+            int tgt = targets[i];
+
+            /* Softmax */
+            float mx = li[0];
+            for (int v = 1; v < V; v++) if (li[v] > mx) mx = li[v];
+            float sum = 0.0f;
+            for (int v = 0; v < V; v++) { probs[v] = expf(li[v] - mx); sum += probs[v]; }
+            float inv_sum = 1.0f / sum;
+            for (int v = 0; v < V; v++) probs[v] *= inv_sum;
+
+            total_loss += -logf(probs[tgt] + 1e-9f);
+
+            /* Gradient: g[v] = (probs[v] - onehot[v]) / M */
+            probs[tgt] -= 1.0f;
+            float inv_M = 1.0f / M;
+
+            /* dx[i] = sum_v g[v] * embed[v], d_embed[v] += g[v] * x[i] */
+            const float* xi = x_final + (long)i * D;
+            float* dxi = dx + (long)i * D;
+
+            for (int v = 0; v < V; v++) {
+                float g = probs[v] * inv_M;
+                if (fabsf(g) < 1e-7f) continue; /* skip near-zero grads */
+                const float* ev = embed + (long)v * D;
+                float* dev = my_de + (long)v * D;
+                for (int d = 0; d < D; d++) {
+                    dxi[d] += g * ev[d];
+                    dev[d] += g * xi[d];
+                }
+            }
+        }
+        free(probs);
+    }
+
+    /* Reduce d_embed */
+    #pragma omp parallel for schedule(static, 1024)
+    for (long idx = 0; idx < (long)V * D; idx++) {
+        float sum = 0.0f;
+        for (int t = 0; t < nthreads; t++) sum += local_de[t][idx];
+        d_embed[idx] += sum;
+    }
+
+    for (int t = 0; t < nthreads; t++) free(local_de[t]);
+    free(local_de);
+
+    *loss_out = (float)(total_loss / M);
+}
+
+/* ===== EMBEDDING LOOKUP ===== */
+void embed_lookup(const float* embed, const int32_t* ids, float* out, int M, int D) {
+    #pragma omp parallel for schedule(static, 256)
+    for (int i = 0; i < M; i++) {
+        int id = ids[i];
+        const float* src = embed + (long)id * D;
+        float* dst = out + (long)i * D;
+        memcpy(dst, src, D * sizeof(float));
+    }
+}
+
+/* ===== EMBEDDING GRADIENT SCATTER ===== */
+/* d_embed[ids[i]] += dx[i] for each i */
+void embed_grad_scatter(float* d_embed, const int32_t* ids, const float* dx, int M, int D) {
+    /* Serial to avoid race conditions on same token ids */
+    for (int i = 0; i < M; i++) {
+        int id = ids[i];
+        float* dst = d_embed + (long)id * D;
+        const float* src = dx + (long)i * D;
+        for (int d = 0; d < D; d++) dst[d] += src[d];
+    }
+}
+
+/* ===== WEIGHT QUANTIZE: float32 shadow -> packed ternary ===== */
+/* BitNet b1.58: round(clip(W / mean(|W|), -1, 1)) */
+void quantize_weights(const float* W, uint8_t* val, uint8_t* sign,
+                       float* scale_out, int rows, int cols) {
+    int KB = (cols + 7) / 8;
+    long total = (long)rows * cols;
+
+    /* Compute mean(|W|) */
+    double sum = 0.0;
+    #pragma omp parallel for reduction(+:sum) schedule(static, 4096)
+    for (long i = 0; i < total; i++) sum += fabsf(W[i]);
+    float scale = (float)(sum / total) + 1e-8f;
+    *scale_out = scale;
+
+    /* Quantize and pack */
+    #pragma omp parallel for schedule(static, 32)
+    for (int r = 0; r < rows; r++) {
+        const float* wr = W + (long)r * cols;
+        uint8_t* vr = val + (long)r * KB;
+        uint8_t* sr = sign + (long)r * KB;
+        memset(vr, 0, KB);
+        memset(sr, 0, KB);
+        for (int c = 0; c < cols; c++) {
+            float q = wr[c] / scale;
+            if (q > 0.5f) {
+                int bi = c / 8, bt = 7 - (c % 8);
+                vr[bi] |= (1 << bt);
+            } else if (q < -0.5f) {
+                int bi = c / 8, bt = 7 - (c % 8);
+                vr[bi] |= (1 << bt);
+                sr[bi] |= (1 << bt);
+            }
+        }
+    }
+}
+
+/* ===== UNPACK TERNARY -> FLOAT32 ===== */
+void unpack_ternary_f32(const uint8_t* val, const uint8_t* sign,
+                         float* out, int rows, int cols) {
+    int KB = (cols + 7) / 8;
+    #pragma omp parallel for schedule(static, 64)
+    for (int i = 0; i < rows; i++) {
+        const uint8_t* vi = val + (long)i * KB;
+        const uint8_t* si = sign + (long)i * KB;
+        float* oi = out + (long)i * cols;
+        for (int j = 0; j < cols; j++) {
+            int bi = j / 8, bt = 7 - (j % 8);
+            uint8_t mask = 1 << bt;
+            if (vi[bi] & mask) {
+                oi[j] = (si[bi] & mask) ? -1.0f : 1.0f;
+            } else {
+                oi[j] = 0.0f;
+            }
+        }
     }
 }

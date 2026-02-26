@@ -3,7 +3,7 @@ FlashLM v6.1 — Full Training Script
 Ternary (1.58-bit) Language Model on Kunpeng 920 ARM CPU
 Uses custom NEON engine (ternary_engine.c) — no PyTorch autograd
 
-Run: OMP_NUM_THREADS=96 python3 train_v6_1.py
+Run: OMP_NUM_THREADS=96 python3 train_v61.py
 """
 
 import os
@@ -14,7 +14,7 @@ import ctypes
 import json
 import numpy as np
 from pathlib import Path
-import glob
+import platform
 
 # ============================================================
 # 0. C2NET CONTEXT SETUP
@@ -26,44 +26,62 @@ dataset_path = c2net_context.dataset_path + "/" + "TinyStories_V2"
 output_path = c2net_context.output_path
 
 # ============================================================
-# 1. COMPILE THE NEON ENGINE
+# 1. COMPILE THE NEON ENGINE (auto-detect ARM vs x86)
 # ============================================================
 
 print("Compiling ternary_engine.so ...")
-PATH_PREFIX = "/usr/local/Ascend/ascend-toolkit/8.0.RC1/toolkit/toolchain/hcc"
-os.environ["PATH"] = f"{PATH_PREFIX}/bin:{PATH_PREFIX}/aarch64-target-linux-gnu/bin:" + os.environ.get("PATH", "")
 
-ret = os.system("gcc -O3 -march=armv8-a+simd -fopenmp -shared -fPIC -lm -o ternary_engine.so ternary_engine.c")
+# Set up ARM toolchain path if on aarch64
+if platform.machine() == 'aarch64':
+    PATH_PREFIX = "/usr/local/Ascend/ascend-toolkit/8.0.RC1/toolkit/toolchain/hcc"
+    if os.path.exists(PATH_PREFIX):
+        os.environ["PATH"] = f"{PATH_PREFIX}/bin:{PATH_PREFIX}/aarch64-target-linux-gnu/bin:" + os.environ.get("PATH", "")
+    cmd = "gcc -O3 -march=armv8-a+simd -fopenmp -shared -fPIC -lm -o ternary_engine.so ternary_engine.c"
+else:
+    # x86 fallback
+    cmd = "gcc -O3 -march=native -fopenmp -shared -fPIC -lm -o ternary_engine.so ternary_engine.c"
+
+ret = os.system(cmd)
 if ret != 0:
     print("ERROR: Compilation failed!")
     sys.exit(1)
 print("Compilation SUCCESS")
 
 # ============================================================
-# 1. LOAD THE NEON ENGINE
+# 2. LOAD THE NEON ENGINE
 # ============================================================
 
 lib = ctypes.CDLL('./ternary_engine.so')
 
 for name, types in [
     ('ternary_matmul',              [ctypes.c_void_p]*5 + [ctypes.c_int]*3),
-    ('int32_to_float32',            [ctypes.c_void_p]*2 + [ctypes.c_int]),
+    ('int32_to_float32',            [ctypes.c_void_p]*2 + [ctypes.c_int, ctypes.c_float]),
     ('silu_f32',                    [ctypes.c_void_p, ctypes.c_int]),
     ('silu_bwd_f32',                [ctypes.c_void_p]*3 + [ctypes.c_int]),
     ('rmsnorm_f32',                 [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
     ('rmsnorm_bwd_f32',             [ctypes.c_void_p]*5 + [ctypes.c_int]*2),
     ('requantize_f32',              [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
     ('cross_entropy_fwd_bwd',       [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
-    ('ternary_transpose_matmul_f32',[ctypes.c_void_p]*4 + [ctypes.c_int]*4),
+    ('cross_entropy_bwd_fused',     [ctypes.c_void_p]*7 + [ctypes.c_int]*3),
+    ('ternary_transpose_matmul_f32',[ctypes.c_void_p]*4 + [ctypes.c_int]*3),
+    ('matmul_f32',                  [ctypes.c_void_p]*3 + [ctypes.c_int]*3),
+    ('matmul_atb_f32',              [ctypes.c_void_p]*3 + [ctypes.c_int]*3),
+    ('embed_lookup',                [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
+    ('embed_grad_scatter',          [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
+    ('quantize_weights',            [ctypes.c_void_p]*3 + [ctypes.c_void_p] + [ctypes.c_int]*2),
+    ('unpack_ternary_f32',          [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
+    ('sgd_momentum',                [ctypes.c_void_p]*3 + [ctypes.c_int] + [ctypes.c_float]*3),
+    ('add_f32',                     [ctypes.c_void_p]*3 + [ctypes.c_int]),
 ]:
     fn = getattr(lib, name, None)
     if fn is not None:
         fn.argtypes = types
 
 lib.cross_entropy_fwd_bwd.restype = ctypes.c_float
+lib.cross_entropy_bwd_fused.restype = None
 
 # ============================================================
-# 2. HYPERPARAMETERS
+# 3. HYPERPARAMETERS
 # ============================================================
 
 class Config:
@@ -83,8 +101,13 @@ class Config:
     grad_clip   = 1.0
     max_epochs  = 1
 
+    # Validation & Generation
+    val_every   = 500
+    gen_every   = 1000
+    gen_tokens  = 128
+
     # Paths
-    data_path   = dataset_path  # was "train_tokens.bin"
+    data_path   = dataset_path
     save_dir    = output_path + "/checkpoints_v6_1"
     log_every   = 10
     save_every  = 500
@@ -97,7 +120,7 @@ class Config:
 cfg = Config()
 
 # ============================================================
-# 3. DATA LOADING
+# 4. DATA LOADING
 # ============================================================
 
 def load_tokens(path):
@@ -118,7 +141,7 @@ def load_tokens(path):
         print(f"Loaded {len(tokens):,} tokens")
         return tokens
 
-    # Train BPE tokenizer on first 100MB of text
+    # Train BPE tokenizer
     print("Training BPE tokenizer (vocab=4096)...")
     t0 = time.time()
 
@@ -144,8 +167,7 @@ def load_tokens(path):
     with open(train_file, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read()
 
-    # Split into stories and tokenize
-    stories = text.split("<|endoftext|>")
+    stories = text.split("")
     print(f"Found {len(stories):,} stories")
 
     for i, story in enumerate(stories):
@@ -169,7 +191,7 @@ def get_batch(tokens, step, cfg):
     """Get a batch of input/target pairs."""
     B   = cfg.batch_size
     T   = cfg.seq_len
-    N   = len(tokens) - 1  # need room for targets
+    N   = len(tokens) - 1
     total_seqs = N // T
 
     start_seq = (step * B) % total_seqs
@@ -185,22 +207,22 @@ def get_batch(tokens, step, cfg):
     return input_ids.reshape(-1), target_ids.reshape(-1)
 
 # ============================================================
-# 4. QUANTIZATION HELPERS
+# 5. QUANTIZATION HELPERS
 # ============================================================
 
-def quantize_weights(W_float):
-    """
-    BitNet b1.58: W_ternary = round(clip(W / mean(|W|), -1, 1))
-    Returns: (val_packed uint8, sign_packed uint8, scale float32)
-    """
-    scale = np.mean(np.abs(W_float)) + 1e-8
-    W_q = np.clip(np.round(W_float / scale), -1, 1).astype(np.int8)
-    val_packed  = np.packbits((np.abs(W_q) > 0).astype(np.uint8), axis=1).copy()
-    sign_packed = np.packbits((W_q < 0).astype(np.uint8), axis=1).copy()
-    return val_packed, sign_packed, np.float32(scale)
+def quantize_weights_c(W_float):
+    """Quantize weights using C kernel."""
+    rows, cols = W_float.shape
+    KB = (cols + 7) // 8
+    val = np.zeros((rows, KB), dtype=np.uint8)
+    sign = np.zeros((rows, KB), dtype=np.uint8)
+    scale = np.zeros(1, dtype=np.float32)
+    lib.quantize_weights(W_float.ctypes.data, val.ctypes.data, sign.ctypes.data,
+                          scale.ctypes.data, rows, cols)
+    return val, sign, scale[0]
 
 # ============================================================
-# 5. MODEL
+# 6. MODEL
 # ============================================================
 
 class FlashLM:
@@ -208,7 +230,7 @@ class FlashLM:
         self.cfg = cfg
         D, FFN, V, L = cfg.d_model, cfg.d_ffn, cfg.vocab_size, cfg.n_layers
 
-        # Float32 shadow weights (trained via SGD)
+        # Float32 shadow weights
         self.embed = (np.random.randn(V, D) * 0.02).astype(np.float32)
         self.W_up   = [(np.random.randn(FFN, D) / math.sqrt(D)).astype(np.float32) for _ in range(L)]
         self.W_down = [(np.random.randn(D, FFN) / math.sqrt(FFN)).astype(np.float32) for _ in range(L)]
@@ -224,8 +246,8 @@ class FlashLM:
 
     def _count_params(self):
         c = self.cfg
-        n = c.vocab_size * c.d_model  # embed
-        n += c.n_layers * (c.d_ffn * c.d_model + c.d_model * c.d_ffn + c.d_model)  # layers
+        n = c.vocab_size * c.d_model
+        n += c.n_layers * (c.d_ffn * c.d_model + c.d_model * c.d_ffn + c.d_model)
         print(f"Model parameters: {n:,} ({n*4/1e6:.1f} MB float32)")
 
     def save(self, path):
@@ -248,7 +270,7 @@ class FlashLM:
         print(f"Loaded checkpoint: {path}")
 
 # ============================================================
-# 6. TRAINING ENGINE
+# 7. TRAINING ENGINE
 # ============================================================
 
 class TrainEngine:
@@ -262,41 +284,39 @@ class TrainEngine:
         KB  = cfg.KB
         KBf = cfg.KBf
 
-        # --- Pre-allocate ALL buffers ---
-        # Forward activations (saved for backward)
+        # Forward activations
         self.x_in     = [np.zeros((M, D), dtype=np.float32) for _ in range(cfg.n_layers)]
         self.x_norm   = [np.zeros((M, D), dtype=np.float32) for _ in range(cfg.n_layers)]
         self.xn_val   = [np.zeros((M, KB), dtype=np.uint8)  for _ in range(cfg.n_layers)]
         self.xn_sign  = [np.zeros((M, KB), dtype=np.uint8)  for _ in range(cfg.n_layers)]
         self.xn_scale = [np.float32(0) for _ in range(cfg.n_layers)]
-        self.h_pre_silu = [np.zeros((M, FFN), dtype=np.float32) for _ in range(cfg.n_layers)]
-        self.h_post_silu= [np.zeros((M, FFN), dtype=np.float32) for _ in range(cfg.n_layers)]
+        self.h_pre    = [np.zeros((M, FFN), dtype=np.float32) for _ in range(cfg.n_layers)]
+        self.h_post   = [np.zeros((M, FFN), dtype=np.float32) for _ in range(cfg.n_layers)]
         self.h_val    = [np.zeros((M, KBf), dtype=np.uint8) for _ in range(cfg.n_layers)]
         self.h_sign   = [np.zeros((M, KBf), dtype=np.uint8) for _ in range(cfg.n_layers)]
         self.h_scale  = [np.float32(0) for _ in range(cfg.n_layers)]
 
-        # Integer matmul outputs
         self.C_up   = np.zeros((M, FFN), dtype=np.int32)
         self.C_down = np.zeros((M, D), dtype=np.int32)
-
-        # Logits and loss
+        self.down_out = np.zeros((M, D), dtype=np.float32)
         self.logits   = np.zeros((M, V), dtype=np.float32)
-        self.ce_grad  = np.zeros((M, V), dtype=np.float32)
 
         # Backward gradients
         self.dx       = np.zeros((M, D), dtype=np.float32)
         self.dx_norm  = np.zeros((M, D), dtype=np.float32)
         self.dh       = np.zeros((M, FFN), dtype=np.float32)
         self.dh_silu  = np.zeros((M, FFN), dtype=np.float32)
-        self.d_down   = np.zeros((M, D), dtype=np.float32)
+        self.dW_up    = np.zeros((D, FFN), dtype=np.float32)
+        self.dW_down  = np.zeros((FFN, D), dtype=np.float32)
+        self.d_gamma  = np.zeros(D, dtype=np.float32)
+        self.d_embed  = np.zeros((V, D), dtype=np.float32)
+        self.loss_buf = np.zeros(1, dtype=np.float32)
 
-        # Weight gradient buffers
-        self.dW_up   = np.zeros((D, FFN), dtype=np.float32)
-        self.dW_down = np.zeros((FFN, D), dtype=np.float32)
-        self.d_gamma = np.zeros(D, dtype=np.float32)
-        self.d_embed = np.zeros((V, D), dtype=np.float32)
+        # Unpacked weight buffers
+        self.Wu_float = np.zeros((FFN, D), dtype=np.float32)
+        self.Wd_float = np.zeros((D, FFN), dtype=np.float32)
 
-        # Quantized weights (refreshed each step)
+        # Quantized weights
         self.Wu_val  = [None] * cfg.n_layers
         self.Wu_sign = [None] * cfg.n_layers
         self.Wu_scale= [np.float32(0)] * cfg.n_layers
@@ -304,268 +324,161 @@ class TrainEngine:
         self.Wd_sign = [None] * cfg.n_layers
         self.Wd_scale= [np.float32(0)] * cfg.n_layers
 
+        # Embedding buffer for forward
+        self.x = np.zeros((M, D), dtype=np.float32)
+        self.embed_T = np.zeros((D, V), dtype=np.float32)
+
     def quantize_all_weights(self):
-        """Quantize shadow weights to ternary for forward pass."""
         for i in range(self.cfg.n_layers):
-            self.Wu_val[i], self.Wu_sign[i], self.Wu_scale[i] = quantize_weights(self.model.W_up[i])
-            self.Wd_val[i], self.Wd_sign[i], self.Wd_scale[i] = quantize_weights(self.model.W_down[i])
+            self.Wu_val[i], self.Wu_sign[i], self.Wu_scale[i] = quantize_weights_c(self.model.W_up[i])
+            self.Wd_val[i], self.Wd_sign[i], self.Wd_scale[i] = quantize_weights_c(self.model.W_down[i])
 
     def forward(self, input_ids, target_ids):
-        """
-        Full forward pass: embed -> 6x(RMSNorm -> quantize -> up -> SiLU -> quantize -> down -> residual) -> logits -> CE
-        Returns loss (float).
-        """
+        """Full forward pass using C kernels."""
         cfg = self.cfg
         M, D, FFN, V = cfg.tokens_per_step, cfg.d_model, cfg.d_ffn, cfg.vocab_size
         KB, KBf = cfg.KB, cfg.KBf
 
-        # Embedding lookup
-        x = self.model.embed[input_ids]  # (M, D)
+        # Embedding lookup (C)
+        lib.embed_lookup(self.model.embed.ctypes.data,
+                         input_ids.ctypes.data, self.x.ctypes.data, M, D)
 
         for layer in range(cfg.n_layers):
-            # Save input for backward
-            np.copyto(self.x_in[layer], x)
+            np.copyto(self.x_in[layer], self.x)
 
-            # RMSNorm
-            lib.rmsnorm_f32(
-                x.ctypes.data,
-                self.model.gamma[layer].ctypes.data,
-                self.x_norm[layer].ctypes.data,
-                M, D
-            )
+            # RMSNorm (C)
+            lib.rmsnorm_f32(self.x.ctypes.data, self.model.gamma[layer].ctypes.data,
+                            self.x_norm[layer].ctypes.data, M, D)
 
-            # Quantize normalized input to ternary
-            scale_x = np.mean(np.abs(self.x_norm[layer])) + 1e-8
-            x_q = np.clip(np.round(self.x_norm[layer] / scale_x), -1, 1).astype(np.int8)
-            np.packbits((np.abs(x_q) > 0).astype(np.uint8), axis=1, out=self.xn_val[layer])
-            np.packbits((x_q < 0).astype(np.uint8), axis=1, out=self.xn_sign[layer])
-            self.xn_scale[layer] = np.float32(scale_x)
+            # Requantize input (C)
+            lib.requantize_f32(self.x_norm[layer].ctypes.data,
+                               self.xn_val[layer].ctypes.data,
+                               self.xn_sign[layer].ctypes.data, M, D)
+            self.xn_scale[layer] = np.float32(np.mean(np.abs(self.x_norm[layer])) + 1e-8)
 
-            # Up projection: ternary matmul (M, D) @ (FFN, D).T -> (M, FFN)
-            lib.ternary_matmul(
-                self.xn_val[layer].ctypes.data, self.xn_sign[layer].ctypes.data,
-                self.Wu_val[layer].ctypes.data, self.Wu_sign[layer].ctypes.data,
-                self.C_up.ctypes.data, M, FFN, KB
-            )
+            # Up projection (C ternary matmul)
+            lib.ternary_matmul(self.xn_val[layer].ctypes.data, self.xn_sign[layer].ctypes.data,
+                               self.Wu_val[layer].ctypes.data, self.Wu_sign[layer].ctypes.data,
+                               self.C_up.ctypes.data, M, FFN, KB)
+            lib.int32_to_float32(self.C_up.ctypes.data, self.h_pre[layer].ctypes.data,
+                                  M * FFN, ctypes.c_float(self.xn_scale[layer] * self.Wu_scale[layer]))
 
-            # Convert int32 -> float32 and apply scales
-            lib.int32_to_float32(self.C_up.ctypes.data, self.h_pre_silu[layer].ctypes.data, M * FFN)
-            self.h_pre_silu[layer] *= (self.xn_scale[layer] * self.Wu_scale[layer])
+            # SiLU (C)
+            np.copyto(self.h_post[layer], self.h_pre[layer])
+            lib.silu_f32(self.h_post[layer].ctypes.data, M * FFN)
 
-            # SiLU activation
-            np.copyto(self.h_post_silu[layer], self.h_pre_silu[layer])
-            lib.silu_f32(self.h_post_silu[layer].ctypes.data, M * FFN)
+            # Requantize hidden (C)
+            lib.requantize_f32(self.h_post[layer].ctypes.data,
+                               self.h_val[layer].ctypes.data,
+                               self.h_sign[layer].ctypes.data, M, FFN)
+            self.h_scale[layer] = np.float32(np.mean(np.abs(self.h_post[layer])) + 1e-8)
 
-            # Quantize hidden to ternary
-            scale_h = np.mean(np.abs(self.h_post_silu[layer])) + 1e-8
-            h_q = np.clip(np.round(self.h_post_silu[layer] / scale_h), -1, 1).astype(np.int8)
-            np.packbits((np.abs(h_q) > 0).astype(np.uint8), axis=1, out=self.h_val[layer])
-            np.packbits((h_q < 0).astype(np.uint8), axis=1, out=self.h_sign[layer])
-            self.h_scale[layer] = np.float32(scale_h)
+            # Down projection (C ternary matmul)
+            lib.ternary_matmul(self.h_val[layer].ctypes.data, self.h_sign[layer].ctypes.data,
+                               self.Wd_val[layer].ctypes.data, self.Wd_sign[layer].ctypes.data,
+                               self.C_down.ctypes.data, M, D, KBf)
+            lib.int32_to_float32(self.C_down.ctypes.data, self.down_out.ctypes.data,
+                                  M * D, ctypes.c_float(self.h_scale[layer] * self.Wd_scale[layer]))
 
-            # Down projection: ternary matmul (M, FFN) @ (D, FFN).T -> (M, D)
-            lib.ternary_matmul(
-                self.h_val[layer].ctypes.data, self.h_sign[layer].ctypes.data,
-                self.Wd_val[layer].ctypes.data, self.Wd_sign[layer].ctypes.data,
-                self.C_down.ctypes.data, M, D, KBf
-            )
+            # Residual (C)
+            lib.add_f32(self.x_in[layer].ctypes.data, self.down_out.ctypes.data,
+                        self.x.ctypes.data, M * D)
 
-            # Convert and scale
-            lib.int32_to_float32(self.C_down.ctypes.data, self.d_down.ctypes.data, M * D)
-            self.d_down *= (self.h_scale[layer] * self.Wd_scale[layer])
+        # Logits: x @ embed.T (numpy BLAS is optimal for float32)
+        np.dot(self.x, self.model.embed.T, out=self.logits)
 
-            # Residual connection
-            x = self.x_in[layer] + self.d_down
-
-        # Output logits: x @ embed.T
-        np.dot(x, self.model.embed.T, out=self.logits)
-
-        # Cross-entropy loss + gradient
-        loss = lib.cross_entropy_fwd_bwd(
-            self.logits.ctypes.data,
-            target_ids.ctypes.data,
-            self.ce_grad.ctypes.data,
-            M, V
-        )
-
-        # Save final hidden for backward
-        self._final_x = x
+        # CE loss only
+        loss = lib.cross_entropy_fwd_bwd(self.logits.ctypes.data, target_ids.ctypes.data,
+                                          self.dx.ctypes.data, M, V)  # dx as temp grad buffer
+        self._final_x = self.x.copy()
+        self._input_ids = input_ids
+        self._target_ids = target_ids
         return float(loss)
 
-    def backward(self, input_ids, target_ids):
-        """
-        Full backward pass with straight-through estimator for ternary quantization.
-        """
+    def backward(self):
+        """Full backward pass using C kernels + numpy BLAS for float matmuls."""
         cfg = self.cfg
         M, D, FFN, V = cfg.tokens_per_step, cfg.d_model, cfg.d_ffn, cfg.vocab_size
         KB, KBf = cfg.KB, cfg.KBf
 
-        # Gradient of logits w.r.t. final hidden: d_x = ce_grad @ embed
-        # ce_grad is (M, V), embed is (V, D) -> dx is (M, D)
-        np.dot(self.ce_grad, self.model.embed, out=self.dx)
-
-        # Embedding gradient: d_embed = ce_grad.T @ final_x ... but actually
-        # d_embed += ce_grad[i].T for each token position
-        # d_embed = ce_grad.T @ final_x  -- NO, logits = x @ embed.T
-        # d_logits/d_embed = x.T @ ce_grad -> (V from transpose)
-        # Actually: logits = x @ E.T, so dL/dE = ce_grad.T @ x
-        np.dot(self.ce_grad.T, self._final_x, out=self.d_embed)
-
-        # Also accumulate embedding gradient from input lookup
-        # dL/d_embed[token_id] += dx_layer0 ... handled after layer loop
+        # Fused CE backward: dx + d_embed in one pass
+        self.d_embed[:] = 0
+        lib.cross_entropy_bwd_fused(
+            self.logits.ctypes.data, self._target_ids.ctypes.data,
+            self._final_x.ctypes.data, self.model.embed.ctypes.data,
+            self.dx.ctypes.data, self.d_embed.ctypes.data,
+            self.loss_buf.ctypes.data, M, V, D)
 
         for layer in range(cfg.n_layers - 1, -1, -1):
-            # dx is the gradient flowing into this layer's output
-            # output = x_in + down_proj(silu(up_proj(rmsnorm(x_in))))
-            # So: d_x_in = dx (residual) + dx through the FFN path
+            dx_residual = self.dx.copy()
 
-            # --- Down projection backward ---
-            # down_out = h_quant @ W_down.T * (h_scale * wd_scale)
-            # Straight-through: treat quantization as identity for gradients
-            # d_h_post_silu = dx @ W_down * (h_scale * wd_scale)  -- but W_down is ternary
-            # Use ternary matmul: dx @ W_down (W_down is D×FFN, we need M×D @ D×FFN -> M×FFN)
-            # Actually W_down is (D, FFN) stored as ternary. We need dx (M,D) multiplied by W_down (D,FFN)
-            # That's a forward-style matmul with dx as input and W_down as weight
-
-            # Requantize dx for ternary matmul through W_down^T
-            # Actually for backward through down proj: d_h = dx @ W_down
-            # W_down shape is (D, FFN), so dx (M,D) @ W_down (D,FFN) = (M, FFN)
-            # But our ternary_matmul does X_packed @ W_packed.T
-            # W_down is (D, FFN), W_down.T is (FFN, D)
-            # So we need: dx_packed @ W_down_transposed_packed
-            # But W_down packed has shape (D, KBf) where KBf = FFN/8
-            # We need it as (FFN, KB) where KB = D/8
-            # Simplest: use numpy for input gradient (it's float @ ternary)
-
-            # d_h_post_silu = dx @ W_down_float * scales
-            # Unpack W_down to float for this matmul
-            wd_float = self._unpack_ternary(self.Wd_val[layer], self.Wd_sign[layer], D, FFN)
-            scale_down = self.h_scale[layer] * self.Wd_scale[layer]
-
-            # dh_post_silu = dx @ W_down * scale_down
-            np.dot(self.dx, wd_float, out=self.dh)
+            # Backward through down: dh = dx @ Wd_float * scale
+            lib.unpack_ternary_f32(self.Wd_val[layer].ctypes.data, self.Wd_sign[layer].ctypes.data,
+                                    self.Wd_float.ctypes.data, D, FFN)
+            scale_down = float(self.h_scale[layer] * self.Wd_scale[layer])
+            np.dot(self.dx, self.Wd_float, out=self.dh)
             self.dh *= scale_down
 
-            # --- SiLU backward ---
-            lib.silu_bwd_f32(
-                self.h_pre_silu[layer].ctypes.data,
-                self.dh.ctypes.data,
-                self.dh_silu.ctypes.data,
-                M * FFN
-            )
+            # SiLU backward (C)
+            lib.silu_bwd_f32(self.h_pre[layer].ctypes.data, self.dh.ctypes.data,
+                             self.dh_silu.ctypes.data, M * FFN)
 
-            # Scale for up projection
-            scale_up = self.xn_scale[layer] * self.Wu_scale[layer]
+            # Weight gradients (C scatter-add)
+            scale_up = float(self.xn_scale[layer] * self.Wu_scale[layer])
             self.dh_silu *= scale_up
 
-            # --- Up projection weight gradient ---
-            # up_out = x_norm_quant @ W_up.T
-            # dW_up = x_norm_quant.T @ dh_silu (using ternary scatter-add)
             lib.ternary_transpose_matmul_f32(
                 self.xn_val[layer].ctypes.data, self.xn_sign[layer].ctypes.data,
-                self.dh_silu.ctypes.data, self.dW_up.ctypes.data,
-                M, D, FFN, KB
-            )
+                self.dh_silu.ctypes.data, self.dW_up.ctypes.data, M, D, FFN)
 
-            # Apply to shadow weights later (accumulate)
-            # dW_up already contains the gradient
-
-            # --- Down projection weight gradient ---
-            # down_out = h_quant @ W_down.T
-            # dW_down = h_quant.T @ dx_scaled
             dx_scaled = self.dx * scale_down
             lib.ternary_transpose_matmul_f32(
                 self.h_val[layer].ctypes.data, self.h_sign[layer].ctypes.data,
-                dx_scaled.ctypes.data, self.dW_down.ctypes.data,
-                M, FFN, D, KBf
-            )
+                dx_scaled.ctypes.data, self.dW_down.ctypes.data, M, FFN, D)
 
-            # --- Up projection input gradient ---
-            # d_x_norm = dh_silu @ W_up * scale_up
-            wu_float = self._unpack_ternary(self.Wu_val[layer], self.Wu_sign[layer], FFN, D)
-            # dh_silu is (M, FFN), W_up is (FFN, D), so dh_silu @ W_up -> error
-            # W_up shape (FFN, D). We need d_x_norm = dh_silu @ W_up  (M,FFN) @ (FFN,D) -> (M,D)
-            np.dot(self.dh_silu, wu_float, out=self.dx_norm)
+            # Input gradient through up: dx_norm = dh_silu @ Wu_float
+            lib.unpack_ternary_f32(self.Wu_val[layer].ctypes.data, self.Wu_sign[layer].ctypes.data,
+                                    self.Wu_float.ctypes.data, FFN, D)
+            np.dot(self.dh_silu, self.Wu_float, out=self.dx_norm)
 
-            # --- RMSNorm backward ---
-            lib.rmsnorm_bwd_f32(
-                self.x_in[layer].ctypes.data,
-                self.model.gamma[layer].ctypes.data,
-                self.dx_norm.ctypes.data,
-                self.d_gamma.ctypes.data,  # d_gamma accumulator
-                self.dx.ctypes.data,       # output: d_x_in from norm path
-                M, D
-            )
+            # RMSNorm backward (numpy - safe)
+            xi = self.x_in[layer]
+            go = self.dx_norm
+            gamma = self.model.gamma[layer]
+            rms2 = np.mean(xi * xi, axis=1, keepdims=True) + 1e-6
+            inv_rms = 1.0 / np.sqrt(rms2)
+            x_hat = xi * inv_rms
+            dot = np.sum(go * gamma * xi, axis=1, keepdims=True)
+            dot *= inv_rms * inv_rms / D
+            dx_from_norm = (go * gamma - xi * dot) * inv_rms
+            self.d_gamma += np.sum(go * x_hat, axis=0)
 
-            # Residual: total d_x_in = dx (from residual) + dx (from norm path)
-            # The rmsnorm_bwd already wrote into self.dx, but we need to add the residual
-            # Actually: d_x_in = d_residual + d_norm_path
-            # d_residual = dx (the gradient flowing in from above)
-            # We need to save dx before overwriting... let me restructure:
+            self.dx = dx_residual + dx_from_norm
 
-            # The dx coming in is the total gradient on the layer output.
-            # Layer output = x_in + ffn(x_in)
-            # So d_x_in = dx + d_ffn_path_through_x_in
-            # rmsnorm_bwd computes d_ffn through rmsnorm into dx buffer
-            # We need: new_dx = old_dx + rmsnorm_bwd_output
-            # But rmsnorm_bwd overwrites self.dx... so we need a temp
+            # Update weights
+            self.model.m_W_up[layer] *= cfg.momentum
+            self.model.m_W_up[layer] += self.dW_up.T
+            self.model.W_up[layer] -= self._current_lr * self.model.m_W_up[layer]
 
-            # FIX: add residual gradient back
-            # rmsnorm_bwd wrote the norm-path gradient into self.dx
-            # We need to add the skip-connection gradient (which is the original dx)
-            # This is already handled if rmsnorm_bwd adds to dx rather than overwriting
-            # For safety, let's just do: dx += dx_from_norm
-            # But we already overwrote... this needs fixing in the loop structure.
+            self.model.m_W_down[layer] *= cfg.momentum
+            self.model.m_W_down[layer] += self.dW_down.T
+            self.model.W_down[layer] -= self._current_lr * self.model.m_W_down[layer]
 
-            # CORRECTED APPROACH: save dx_residual before rmsnorm_bwd
-            # Actually the residual gradient IS the dx that flows in. After rmsnorm_bwd
-            # computes the gradient through the FFN path back to x_in, we add them.
-            # Let me restructure...
+            self.model.m_gamma[layer] *= cfg.momentum
+            self.model.m_gamma[layer] += self.d_gamma
+            self.model.gamma[layer] -= self._current_lr * self.model.m_gamma[layer]
+            self.d_gamma[:] = 0
 
-            # For now: the gradient from the residual is already in dx from above.
-            # rmsnorm_bwd gives us the gradient through the FFN path.
-            # We stored that in self.dx, but we lost the residual.
-            # FIX: store residual first, then add.
+        # Embedding gradient from input
+        lib.embed_grad_scatter(self.d_embed.ctypes.data, self._input_ids.ctypes.data,
+                               self.dx.ctypes.data, M, D)
 
-            # This is a bug — let me handle it properly below.
-
-            # --- Weight updates for this layer ---
-            self._sgd_update(self.model.W_up[layer], self.dW_up, self.model.m_W_up[layer])
-            self._sgd_update(self.model.W_down[layer], self.dW_down.T.copy(), self.model.m_W_down[layer])
-            self._sgd_update_1d(self.model.gamma[layer], self.d_gamma, self.model.m_gamma[layer])
-
-        # Embedding update
-        # Add gradient from input lookup: for each position, d_embed[input_ids[i]] += dx[i]
-        np.add.at(self.d_embed, input_ids, self.dx)
-        self._sgd_update(self.model.embed, self.d_embed, self.model.m_embed)
-
-    def _unpack_ternary(self, val_packed, sign_packed, rows, cols):
-        """Unpack packed ternary to float32."""
-        KB = (cols + 7) // 8
-        out = np.zeros((rows, cols), dtype=np.float32)
-        val_unpacked = np.unpackbits(val_packed, axis=1)[:, :cols]
-        sign_unpacked = np.unpackbits(sign_packed, axis=1)[:, :cols]
-        out[val_unpacked == 1] = 1.0
-        out[(val_unpacked == 1) & (sign_unpacked == 1)] = -1.0
-        return out
-
-    def _sgd_update(self, W, dW, m):
-        """SGD with momentum."""
-        lr = self._current_lr
-        m *= cfg.momentum
-        m += dW
-        W -= lr * m
-
-    def _sgd_update_1d(self, W, dW, m):
-        """SGD with momentum for 1D params."""
-        lr = self._current_lr
-        m *= cfg.momentum
-        m += dW
-        W -= lr * m
+        # Update embedding
+        self.model.m_embed *= cfg.momentum
+        self.model.m_embed += self.d_embed
+        self.model.embed -= self._current_lr * self.model.m_embed
 
     def step(self, input_ids, target_ids, step_num, total_steps):
-        """One full training step: quantize -> forward -> backward -> update."""
-        # Learning rate schedule (cosine with warmup)
         if step_num < cfg.warmup_steps:
             lr = cfg.lr_max * (step_num + 1) / cfg.warmup_steps
         else:
@@ -573,109 +486,113 @@ class TrainEngine:
             lr = cfg.lr_min + 0.5 * (cfg.lr_max - cfg.lr_min) * (1 + math.cos(math.pi * progress))
         self._current_lr = lr
 
-        # Quantize all shadow weights to ternary
         self.quantize_all_weights()
-
-        # Forward
         loss = self.forward(input_ids, target_ids)
-
-        # Backward + weight updates
-        self.backward(input_ids, target_ids)
-
+        self.backward()
         return loss, lr
 
 # ============================================================
-# 7. FIX: PROPER BACKWARD WITH RESIDUAL GRADIENTS
+# 8. VALIDATION & GENERATION
 # ============================================================
 
-# The backward method above has a residual gradient bug.
-# Here's the corrected version that properly handles skip connections:
+def validate(model, engine, tokens, cfg, num_batches=10):
+    """Evaluate on validation set."""
+    M = cfg.tokens_per_step
+    total_loss = 0.0
+    N = len(tokens) - M - 1
+    start_offset = N // 2  # Use second half as validation
 
-class TrainEngineFixed(TrainEngine):
-    def backward(self, input_ids, target_ids):
-        cfg = self.cfg
-        M, D, FFN, V = cfg.tokens_per_step, cfg.d_model, cfg.d_ffn, cfg.vocab_size
-        KB, KBf = cfg.KB, cfg.KBf
+    engine.quantize_all_weights()
+    for b in range(num_batches):
+        offset = start_offset + b * M
+        input_ids = tokens[offset : offset + M].astype(np.int32)
+        target_ids = tokens[offset + 1 : offset + M + 1].astype(np.int32)
 
-        # dL/d_final_x = ce_grad @ embed
-        np.dot(self.ce_grad, self.model.embed, out=self.dx)
+        # Forward only
+        loss = engine.forward(input_ids, target_ids)
+        total_loss += loss
 
-        # dL/d_embed from output head: ce_grad.T @ final_x
-        np.dot(self.ce_grad.T, self._final_x, out=self.d_embed)
+    avg_loss = total_loss / num_batches
+    ppl = math.exp(avg_loss)
+    bpc = avg_loss / math.log(2)
+    return avg_loss, ppl, bpc
 
-        for layer in range(cfg.n_layers - 1, -1, -1):
-            # dx = gradient on layer output = gradient on (x_in + ffn_out)
-            # d_x_in gets: dx (residual) + gradient through FFN path
+def generate(model, engine, tokenizer, prompt, cfg, max_tokens=128, temperature=1.0, top_k=40):
+    """Generate text from prompt."""
+    eos_id = tokenizer.token_to_id("<|eos|>") or 0
 
-            # Save residual gradient
-            dx_residual = self.dx.copy()
+    # Encode prompt
+    ids = tokenizer.encode(prompt).ids
+    generated = list(ids)
 
-            # --- Backward through down projection ---
-            wd_float = self._unpack_ternary(self.Wd_val[layer], self.Wd_sign[layer], D, FFN)
-            scale_down = float(self.h_scale[layer] * self.Wd_scale[layer])
-            np.dot(self.dx, wd_float, out=self.dh)
-            self.dh *= scale_down
+    engine.quantize_all_weights()
 
-            # --- SiLU backward ---
-            lib.silu_bwd_f32(
-                self.h_pre_silu[layer].ctypes.data,
-                self.dh.ctypes.data,
-                self.dh_silu.ctypes.data,
-                M * FFN
-            )
+    for _ in range(max_tokens):
+        # Get last seq_len tokens
+        ctx = generated[-cfg.seq_len:]
+        ctx = np.array(ctx, dtype=np.int32)
+        ctx_len = len(ctx)
 
-            # --- Weight gradients ---
-            scale_up = float(self.xn_scale[layer] * self.Wu_scale[layer])
+        # Forward pass on single sequence
+        # We reuse engine buffers but only process 1 sequence
+        M, D, V = 1, cfg.d_model, cfg.vocab_size
+        x = model.embed[ctx[-1:]]  # Just last token
 
-            # dW_up = xn_ternary.T @ (dh_silu)
-            lib.ternary_transpose_matmul_f32(
-                self.xn_val[layer].ctypes.data, self.xn_sign[layer].ctypes.data,
-                self.dh_silu.ctypes.data, self.dW_up.ctypes.data,
-                M, D, FFN, KB
-            )
+        for layer in range(cfg.n_layers):
+            # RMSNorm
+            rms = np.sqrt(np.mean(x * x) + 1e-6)
+            xn = x / rms * model.gamma[layer]
 
-            # dW_down = h_ternary.T @ dx
-            lib.ternary_transpose_matmul_f32(
-                self.h_val[layer].ctypes.data, self.h_sign[layer].ctypes.data,
-                self.dx.ctypes.data, self.dW_down.ctypes.data,
-                M, FFN, D, KBf
-            )
+            # Quantize
+            scale = np.mean(np.abs(xn)) + 1e-8
+            xn_q = np.clip(np.round(xn / scale), -1, 1).astype(np.int8)
+            xn_val = np.packbits((np.abs(xn_q) > 0).astype(np.uint8))
+            xn_sign = np.packbits((xn_q < 0).astype(np.uint8))
 
-            # --- Input gradient through up projection ---
-            wu_float = self._unpack_ternary(self.Wu_val[layer], self.Wu_sign[layer], FFN, D)
-            np.dot(self.dh_silu, wu_float, out=self.dx_norm)
+            # Get quantized weights
+            wu_val, wu_sign, wu_scale = quantize_weights_c(model.W_up[layer])
+            wd_val, wd_sign, wd_scale = quantize_weights_c(model.W_down[layer])
 
-            # --- RMSNorm backward ---
-            # Computes gradient through rmsnorm into a buffer
-            dx_from_norm = np.zeros((M, D), dtype=np.float32)
-            lib.rmsnorm_bwd_f32(
-                self.x_in[layer].ctypes.data,
-                self.model.gamma[layer].ctypes.data,
-                self.dx_norm.ctypes.data,
-                self.d_gamma.ctypes.data,
-                dx_from_norm.ctypes.data,
-                M, D
-            )
+            # Up projection (simplified for single token)
+            KB = cfg.KB
+            h = np.zeros(cfg.d_ffn, dtype=np.float32)
+            # ... simplified: just use numpy for single-token inference
+            wu_float = np.zeros((cfg.d_ffn, D), dtype=np.float32)
+            lib.unpack_ternary_f32(wu_val.ctypes.data, wu_sign.ctypes.data,
+                                    wu_float.ctypes.data, cfg.d_ffn, D)
+            h = xn @ wu_float.T * scale * wu_scale
 
-            # Total gradient on x_in = residual + norm path
-            self.dx = dx_residual + dx_from_norm
+            # SiLU
+            h = h / (1 + np.exp(-h))
 
-            # --- Update weights ---
-            self._sgd_update(self.model.W_up[layer], self.dW_up, self.model.m_W_up[layer])
-            # dW_down from scatter is (D, FFN) but W_down is (D, FFN) — check shapes
-            self._sgd_update(self.model.W_down[layer], self.dW_down, self.model.m_W_down[layer])
-            self._sgd_update_1d(self.model.gamma[layer], self.d_gamma, self.model.m_gamma[layer])
+            # Down projection
+            wd_float = np.zeros((D, cfg.d_ffn), dtype=np.float32)
+            lib.unpack_ternary_f32(wd_val.ctypes.data, wd_sign.ctypes.data,
+                                    wd_float.ctypes.data, D, cfg.d_ffn)
+            out = h @ wd_float.T
 
-        # Embedding gradient: from output head + from input grad
-        np.add.at(self.d_embed, input_ids, self.dx)
-        self._sgd_update(self.model.embed, self.d_embed, self.model.m_embed)
+            # Residual
+            x = x + out
 
-        # Zero gradient accumulators
-        self.d_embed[:] = 0
-        self.d_gamma[:] = 0
+        # Logits
+        logits = x @ model.embed.T
+
+        # Sample
+        logits = logits[0] / temperature
+        top_k_ids = np.argsort(logits)[-top_k:]
+        top_k_logits = logits[top_k_ids]
+        probs = np.exp(top_k_logits - np.max(top_k_logits))
+        probs /= probs.sum()
+        next_id = np.random.choice(top_k_ids, p=probs)
+
+        generated.append(int(next_id))
+        if next_id == eos_id:
+            break
+
+    return tokenizer.decode(generated)
 
 # ============================================================
-# 8. MAIN TRAINING LOOP
+# 9. MAIN TRAINING LOOP
 # ============================================================
 
 def train():
@@ -684,16 +601,11 @@ def train():
     print("="*60)
 
     # Load data
-    if not os.path.exists(cfg.data_path):
-        print(f"ERROR: {cfg.data_path} not found!")
-        print("Expected: uint16 binary file of token IDs")
-        sys.exit(1)
-
     tokens = load_tokens(cfg.data_path)
 
-    # Update vocab size from tokenizer if it exists
+    # Load tokenizer
+    from tokenizers import Tokenizer
     if os.path.exists("tokenizer_v61.json"):
-        from tokenizers import Tokenizer
         tok = Tokenizer.from_file("tokenizer_v61.json")
         cfg.vocab_size = tok.get_vocab_size()
         print(f"Vocab size: {cfg.vocab_size}")
@@ -703,13 +615,12 @@ def train():
     print(f"Total tokens: {total_tokens:,}")
     print(f"Tokens per step: {cfg.tokens_per_step:,}")
     print(f"Total steps per epoch: {total_steps:,}")
-    print(f"Epochs: {cfg.max_epochs}")
 
-    # Initialize model
+    # Initialize
     model = FlashLM(cfg)
-    engine = TrainEngineFixed(model, cfg)
+    engine = TrainEngine(model, cfg)
 
-    # Check for existing checkpoint
+    # Resume
     os.makedirs(cfg.save_dir, exist_ok=True)
     ckpts = sorted(Path(cfg.save_dir).glob("step_*.npz"))
     start_step = 0
@@ -719,11 +630,11 @@ def train():
         start_step = int(last.split("step_")[1].split(".")[0]) + 1
         print(f"Resuming from step {start_step}")
 
-    # Training loop
+    # Train
     print(f"\n{'Step':>8} {'Loss':>8} {'Tok/s':>10} {'LR':>10} {'Elapsed':>10} {'ETA':>10}")
     print("-" * 68)
 
-    total_tokens_processed = 0
+    total_processed = 0
     t_start = time.time()
     losses = []
 
@@ -732,55 +643,47 @@ def train():
             global_step = epoch * total_steps + step
             t_step = time.time()
 
-            # Get batch
             input_ids, target_ids = get_batch(tokens, step, cfg)
-
-            # Train step
             loss, lr = engine.step(input_ids, target_ids, global_step, total_steps * cfg.max_epochs)
 
             step_time = time.time() - t_step
             tps = cfg.tokens_per_step / step_time
-            total_tokens_processed += cfg.tokens_per_step
+            total_processed += cfg.tokens_per_step
             losses.append(loss)
 
-            # Logging
+            # Log
             if step % cfg.log_every == 0 or step == total_steps - 1:
                 elapsed = time.time() - t_start
-                remaining_steps = total_steps * cfg.max_epochs - global_step - 1
-                eta = remaining_steps * (elapsed / (global_step - start_step + 1)) if global_step > start_step else 0
-                avg_loss = np.mean(losses[-cfg.log_every:])
+                remaining = total_steps * cfg.max_epochs - global_step - 1
+                eta = remaining * (elapsed / (global_step - start_step + 1)) if global_step > start_step else 0
+                avg = np.mean(losses[-cfg.log_every:])
+                print(f"{global_step:>8d} {avg:>8.4f} {tps:>10,.0f} {lr:>10.6f} {elapsed/60:>10.1f}m {eta/60:>10.1f}m")
 
-                elapsed_str = f"{elapsed/60:.1f}m"
-                eta_str = f"{eta/60:.1f}m"
+            # Validate
+            if step % cfg.val_every == 0 and step > 0:
+                val_loss, val_ppl, val_bpc = validate(model, engine, tokens, cfg)
+                print(f"  [Validation] Loss: {val_loss:.4f} | PPL: {val_ppl:.2f} | BPC: {val_bpc:.4f}")
 
-                print(f"{global_step:>8d} {avg_loss:>8.4f} {tps:>10,.0f} {lr:>10.6f} {elapsed_str:>10} {eta_str:>10}")
+            # Generate
+            if step % cfg.gen_every == 0 and step > 0:
+                sample = generate(model, engine, tok, "Once upon a time", cfg, max_tokens=64)
+                print(f"  [Sample] {sample[:100]}...")
 
-            # Save checkpoint
+            # Save
             if step % cfg.save_every == 0 and step > 0:
                 model.save(f"{cfg.save_dir}/step_{global_step:06d}.npz")
 
-            # Save loss log
-            if step % 100 == 0:
-                with open(f"{cfg.save_dir}/loss_log.json", "w") as f:
-                    json.dump({
-                        "step": global_step,
-                        "losses": losses[-1000:],
-                        "total_tokens": total_tokens_processed,
-                        "elapsed_sec": time.time() - t_start,
-                    }, f)
+        start_step = 0
 
-        start_step = 0  # reset for next epoch
-
-    # Final save
+    # Final
     total_time = time.time() - t_start
     model.save(f"{cfg.save_dir}/final.npz")
     print(f"\nTraining complete!")
     print(f"Total time: {total_time/60:.1f} min")
-    print(f"Total tokens: {total_tokens_processed:,}")
-    print(f"Average throughput: {total_tokens_processed/total_time:,.0f} tok/s")
+    print(f"Total tokens: {total_processed:,}")
+    print(f"Avg throughput: {total_processed/total_time:,.0f} tok/s")
     print(f"Final loss: {np.mean(losses[-50:]):.4f}")
 
-    # Upload results
     upload_output()
 
 if __name__ == "__main__":
