@@ -14,9 +14,19 @@ import ctypes
 import json
 import numpy as np
 from pathlib import Path
+import glob
 
 # ============================================================
-# 0. COMPILE THE NEON ENGINE
+# 0. C2NET CONTEXT SETUP
+# ============================================================
+
+from c2net.context import prepare, upload_output
+c2net_context = prepare()
+dataset_path = c2net_context.dataset_path + "/" + "TinyStories_V2"
+output_path = c2net_context.output_path
+
+# ============================================================
+# 1. COMPILE THE NEON ENGINE
 # ============================================================
 
 print("Compiling ternary_engine.so ...")
@@ -74,8 +84,8 @@ class Config:
     max_epochs  = 1
 
     # Paths
-    data_path   = "train_tokens.bin"   # uint16 token file
-    save_dir    = "checkpoints_v6_1"
+    data_path   = dataset_path  # was "train_tokens.bin"
+    save_dir    = output_path + "/checkpoints_v6_1"
     log_every   = 10
     save_every  = 500
 
@@ -91,10 +101,33 @@ cfg = Config()
 # ============================================================
 
 def load_tokens(path):
-    """Load tokenized dataset (uint16 binary file)."""
-    data = np.fromfile(path, dtype=np.uint16)
-    print(f"Loaded {len(data):,} tokens from {path}")
-    return data
+    """Load and tokenize TinyStories dataset."""
+    # Check what files exist
+    print(f"Dataset contents: {os.listdir(path)[:20]}")
+    
+    # Try to find existing token files first
+    bin_files = glob.glob(os.path.join(path, "*.bin"))
+    npy_files = glob.glob(os.path.join(path, "*.npy"))
+    txt_files = glob.glob(os.path.join(path, "*.txt"))
+    json_files = glob.glob(os.path.join(path, "*.json"))
+    
+    print(f"Found: {len(bin_files)} .bin, {len(npy_files)} .npy, {len(txt_files)} .txt, {len(json_files)} .json")
+    
+    if bin_files:
+        data = np.fromfile(bin_files[0], dtype=np.uint16)
+        print(f"Loaded {len(data):,} tokens from {bin_files[0]}")
+        return data
+    elif npy_files:
+        data = np.load(npy_files[0]).astype(np.uint16)
+        print(f"Loaded {len(data):,} tokens from {npy_files[0]}")
+        return data
+    else:
+        print(f"No pre-tokenized files found. Contents:")
+        for f in sorted(os.listdir(path))[:30]:
+            fp = os.path.join(path, f)
+            sz = os.path.getsize(fp) / 1e6
+            print(f"  {f} ({sz:.1f} MB)")
+        sys.exit(1)
 
 def get_batch(tokens, step, cfg):
     """Get a batch of input/target pairs."""
@@ -702,6 +735,9 @@ def train():
     print(f"Total tokens: {total_tokens_processed:,}")
     print(f"Average throughput: {total_tokens_processed/total_time:,.0f} tok/s")
     print(f"Final loss: {np.mean(losses[-50:]):.4f}")
+
+    # Upload results
+    upload_output()
 
 if __name__ == "__main__":
     train()
