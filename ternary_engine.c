@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* ===== TERNARY MATMUL ===== */
 void ternary_matmul(
@@ -40,6 +41,47 @@ void ternary_matmul(
     }
 }
 
+/* ===== TERNARY-FLOAT WEIGHT GRADIENT: dW = X_ternary.T @ grad_float ===== */
+void ternary_transpose_matmul_f32(
+    const uint8_t* X_val, const uint8_t* X_sign,
+    const float* grad, float* dW,
+    int M, int K, int N
+) {
+    int KB = (K + 7) / 8;
+    memset(dW, 0, (long)K * N * sizeof(float));
+
+    #pragma omp parallel for schedule(static, 4) collapse(2)
+    for (int k = 0; k < K; k++) {
+        for (int n = 0; n < N; n++) {
+            int byte_idx = k / 8;
+            int bit_idx = 7 - (k % 8);
+            uint8_t mask = 1 << bit_idx;
+            float sum = 0.0f;
+            int i = 0;
+            for (; i + 3 < M; i += 4) {
+                uint8_t v0 = X_val[(long)i * KB + byte_idx];
+                uint8_t s0 = X_sign[(long)i * KB + byte_idx];
+                uint8_t v1 = X_val[(long)(i+1) * KB + byte_idx];
+                uint8_t s1 = X_sign[(long)(i+1) * KB + byte_idx];
+                uint8_t v2 = X_val[(long)(i+2) * KB + byte_idx];
+                uint8_t s2 = X_sign[(long)(i+2) * KB + byte_idx];
+                uint8_t v3 = X_val[(long)(i+3) * KB + byte_idx];
+                uint8_t s3 = X_sign[(long)(i+3) * KB + byte_idx];
+                if (v0 & mask) sum += (s0 & mask) ? -grad[(long)i * N + n] : grad[(long)i * N + n];
+                if (v1 & mask) sum += (s1 & mask) ? -grad[(long)(i+1) * N + n] : grad[(long)(i+1) * N + n];
+                if (v2 & mask) sum += (s2 & mask) ? -grad[(long)(i+2) * N + n] : grad[(long)(i+2) * N + n];
+                if (v3 & mask) sum += (s3 & mask) ? -grad[(long)(i+3) * N + n] : grad[(long)(i+3) * N + n];
+            }
+            for (; i < M; i++) {
+                uint8_t v = X_val[(long)i * KB + byte_idx];
+                uint8_t s = X_sign[(long)i * KB + byte_idx];
+                if (v & mask) sum += (s & mask) ? -grad[(long)i * N + n] : grad[(long)i * N + n];
+            }
+            dW[(long)k * N + n] = sum;
+        }
+    }
+}
+
 /* ===== SiLU IN-PLACE ===== */
 void silu_f32(float* x, int n) {
     #pragma omp parallel for schedule(static, 4096)
@@ -49,7 +91,7 @@ void silu_f32(float* x, int n) {
     }
 }
 
-/* ===== SiLU BACKWARD: grad_in = grad_out * (sigmoid(x) + x*sigmoid(x)*(1-sigmoid(x))) ===== */
+/* ===== SiLU BACKWARD ===== */
 void silu_bwd_f32(const float* x, const float* grad_out, float* grad_in, int n) {
     #pragma omp parallel for schedule(static, 4096)
     for (int i = 0; i < n; i++) {
@@ -74,9 +116,7 @@ void rmsnorm_f32(const float* x, const float* gamma, float* out, int M, int D) {
 /* ===== RMSNORM BACKWARD ===== */
 void rmsnorm_bwd_f32(const float* x, const float* gamma, const float* grad_out,
                       float* grad_in, float* grad_gamma, int M, int D) {
-    // Zero grad_gamma
     memset(grad_gamma, 0, D * sizeof(float));
-    float* tmp_gg = (float*)calloc(D, sizeof(float));
 
     #pragma omp parallel
     {
@@ -102,7 +142,6 @@ void rmsnorm_bwd_f32(const float* x, const float* gamma, const float* grad_out,
         for (int j = 0; j < D; j++) grad_gamma[j] += local_gg[j];
         free(local_gg);
     }
-    free(tmp_gg);
 }
 
 /* ===== REQUANTIZE: float32 -> packed ternary ===== */
@@ -139,10 +178,8 @@ float cross_entropy_fwd_bwd(const float* logits, const int32_t* targets,
         const float* li = logits + (long)i * V;
         float* gi = grad + (long)i * V;
         int t = targets[i];
-        // Find max for numerical stability
         float mx = -1e30f;
         for (int j = 0; j < V; j++) if (li[j] > mx) mx = li[j];
-        // Compute softmax and gradient
         float sum = 0.0f;
         for (int j = 0; j < V; j++) {
             gi[j] = expf(li[j] - mx);
@@ -152,54 +189,10 @@ float cross_entropy_fwd_bwd(const float* logits, const int32_t* targets,
         for (int j = 0; j < V; j++) gi[j] *= inv_sum;
         total_loss += -logf(gi[t] + 1e-9f);
         gi[t] -= 1.0f;
-        // Scale gradient by 1/M
         float scale = 1.0f / M;
         for (int j = 0; j < V; j++) gi[j] *= scale;
     }
     return (float)(total_loss / M);
-}
-
-/* ===== MATMUL FLOAT32 (for embedding/lm_head grad) ===== */
-void matmul_f32(const float* A, const float* B, float* C,
-                int M, int K, int N) {
-    // C = A @ B, A is MxK, B is KxN, C is MxN
-    memset(C, 0, (long)M * N * sizeof(float));
-    #pragma omp parallel for schedule(static, 16)
-    for (int i = 0; i < M; i++) {
-        for (int k = 0; k < K; k++) {
-            float a = A[(long)i * K + k];
-            for (int j = 0; j < N; j++) {
-                C[(long)i * N + j] += a * B[(long)k * N + j];
-            }
-        }
-    }
-}
-
-/* ===== MATMUL_AT_B: C = A^T @ B (for weight gradients) ===== */
-void matmul_atb_f32(const float* A, const float* B, float* C,
-                     int M, int K, int N) {
-    // A is MxK, B is MxN, C = A^T @ B = KxN
-    memset(C, 0, (long)K * N * sizeof(float));
-    #pragma omp parallel for schedule(static, 4)
-    for (int k = 0; k < K; k++) {
-        for (int i = 0; i < M; i++) {
-            float a = A[(long)i * K + k];
-            for (int j = 0; j < N; j++) {
-                C[(long)k * N + j] += a * B[(long)i * N + j];
-            }
-        }
-    }
-}
-
-/* ===== SGD WITH MOMENTUM ===== */
-void sgd_momentum(float* param, float* grad, float* velocity,
-                   int n, float lr, float momentum, float wd) {
-    #pragma omp parallel for schedule(static, 4096)
-    for (int i = 0; i < n; i++) {
-        grad[i] += wd * param[i];
-        velocity[i] = momentum * velocity[i] + grad[i];
-        param[i] -= lr * velocity[i];
-    }
 }
 
 /* ===== INT32 TO FLOAT32 WITH SCALE ===== */
@@ -220,4 +213,15 @@ void add_f32(const float* a, const float* b, float* out, int n) {
 void mul_f32(const float* a, const float* b, float* out, int n) {
     #pragma omp parallel for schedule(static, 4096)
     for (int i = 0; i < n; i++) out[i] = a[i] * b[i];
+}
+
+/* ===== SGD WITH MOMENTUM ===== */
+void sgd_momentum(float* param, float* grad, float* velocity,
+                   int n, float lr, float momentum, float wd) {
+    #pragma omp parallel for schedule(static, 4096)
+    for (int i = 0; i < n; i++) {
+        grad[i] += wd * param[i];
+        velocity[i] = momentum * velocity[i] + grad[i];
+        param[i] -= lr * velocity[i];
+    }
 }
