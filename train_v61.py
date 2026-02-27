@@ -96,11 +96,11 @@ class Config:
 
     # Training
     batch_size  = 256
-    lr_max      = 1e-3
-    lr_min      = 1e-4
+    lr_max      = 0.01    # was 1e-3, increase 10x
+    lr_min      = 0.001   # was 1e-4
     warmup_steps= 100
     momentum    = 0.9
-    grad_clip   = 0.0   # disable - gradients are healthy after rmsnorm fix
+    grad_clip   = 500.0  # safety net only, not aggressive (rmsnorm fix applied)
     max_epochs  = 1
 
     # Validation & Generation
@@ -289,7 +289,7 @@ class TrainEngine:
 
         # Per-layer activation storage
         self.x       = [np.zeros((M, D), dtype=np.float32) for _ in range(L + 1)]  # Original residual stream
-        self.xn      = [np.zeros((M, D), dtype=np.float32) for _ in range(L)]  # Normalized output (separate buffer!)
+        self.xn      = np.zeros((M, D), dtype=np.float32)  # Single reusable buffer for normalized output
         self.xn_val  = [np.zeros((M, KB), dtype=np.uint8) for _ in range(L)]
         self.xn_sign = [np.zeros((M, KB), dtype=np.uint8) for _ in range(L)]
         self.xn_scale= [np.float32(0) for _ in range(L)]
@@ -342,11 +342,13 @@ class TrainEngine:
         for i in range(self.cfg.n_layers):
             self.Wu_val[i], self.Wu_sign[i], self.Wu_scale[i] = quantize_weights_c(self.model.W_up[i])
             self.Wd_val[i], self.Wd_sign[i], self.Wd_scale[i] = quantize_weights_c(self.model.W_down[i])
-            # Unpack for backward matmuls
+            # Unpack AND SCALE for backward matmuls - scales must match forward pass
             lib.unpack_ternary_f32(self.Wu_val[i].ctypes.data, self.Wu_sign[i].ctypes.data,
                                     self.Wu_float[i].ctypes.data, self.cfg.d_ffn, self.cfg.d_model)
+            self.Wu_float[i] *= self.Wu_scale[i]  # Scale to match forward pass
             lib.unpack_ternary_f32(self.Wd_val[i].ctypes.data, self.Wd_sign[i].ctypes.data,
                                     self.Wd_float[i].ctypes.data, self.cfg.d_model, self.cfg.d_ffn)
+            self.Wd_float[i] *= self.Wd_scale[i]  # Scale to match forward pass
 
     def forward(self, input_ids, target_ids):
         """Full forward pass using ONLY C kernels."""
@@ -359,14 +361,14 @@ class TrainEngine:
                          self.x[0].ctypes.data, M, D)
 
         for layer in range(L):
-            # RMSNorm (C) - output to separate xn buffer, keep x[layer] as original
+            # RMSNorm (C) - output to shared xn buffer, keep x[layer] as original
             lib.rmsnorm_f32(self.x[layer].ctypes.data, self.model.gamma[layer].ctypes.data,
-                            self.xn[layer].ctypes.data, M, D)
+                            self.xn.ctypes.data, M, D)
 
             # Requantize (C) - use xn (normalized), not x (original)
-            lib.requantize_f32(self.xn[layer].ctypes.data, self.xn_val[layer].ctypes.data,
+            lib.requantize_f32(self.xn.ctypes.data, self.xn_val[layer].ctypes.data,
                                self.xn_sign[layer].ctypes.data, M, D)
-            self.xn_scale[layer] = np.float32(lib.mean_abs_f32(self.xn[layer].ctypes.data, M * D) + 1e-8)
+            self.xn_scale[layer] = np.float32(lib.mean_abs_f32(self.xn.ctypes.data, M * D) + 1e-8)
 
             # Up projection (C ternary)
             lib.ternary_matmul(self.xn_val[layer].ctypes.data, self.xn_sign[layer].ctypes.data,
@@ -472,9 +474,13 @@ class TrainEngine:
             # Residual gradient: dx_cur = dx_rms + dx_sav
             lib.add_f32(self.dx_rms.ctypes.data, dx_sav.ctypes.data, dx_cur.ctypes.data, M * D)
 
-            # Gradient clipping (per-layer)
-            grad_norm = np.sqrt(np.sum(self.dW_up**2) + np.sum(self.dW_down**2) + np.sum(self.d_gamma**2))
-            if grad_norm > cfg.grad_clip:
+            # Gradient clipping (per-layer) - use float64 to prevent overflow in norm computation
+            grad_norm = float(np.sqrt(
+                np.sum(self.dW_up.astype(np.float64)**2) +
+                np.sum(self.dW_down.astype(np.float64)**2) +
+                np.sum(self.d_gamma.astype(np.float64)**2)
+            ))
+            if cfg.grad_clip > 0 and grad_norm > cfg.grad_clip:
                 clip_scale = cfg.grad_clip / (grad_norm + 1e-6)
                 self.dW_up *= clip_scale
                 self.dW_down *= clip_scale
@@ -499,9 +505,9 @@ class TrainEngine:
         if dx_cur is not self.dxA:
             np.copyto(self.dxA, dx_cur)
 
-        # Gradient clipping for embedding
-        embed_grad_norm = np.sqrt(np.sum(self.d_embed**2))
-        if embed_grad_norm > cfg.grad_clip:
+        # Gradient clipping for embedding - use float64 to prevent overflow
+        embed_grad_norm = float(np.sqrt(np.sum(self.d_embed.astype(np.float64)**2)))
+        if cfg.grad_clip > 0 and embed_grad_norm > cfg.grad_clip:
             self.d_embed *= cfg.grad_clip / (embed_grad_norm + 1e-6)
 
         # Embedding gradient from input (scatter)
@@ -569,11 +575,11 @@ def generate(model, engine, tokenizer, prompt, cfg, max_tokens=64, temperature=1
             rms = np.sqrt(np.mean(x * x) + 1e-6)
             xn = x / rms * model.gamma[layer]
 
-            # Forward through layer
+            # Forward through layer (Wu_float/Wd_float already include their scales)
             scale = np.mean(np.abs(xn)) + 1e-8
-            h = xn @ engine.Wu_float[layer].T * scale * engine.Wu_scale[layer]
+            h = xn @ engine.Wu_float[layer].T * scale  # Wu_scale already in Wu_float
             h = h / (1 + np.exp(-h))  # SiLU
-            out = h @ engine.Wd_float[layer].T * engine.h_scale[layer] * engine.Wd_scale[layer]
+            out = h @ engine.Wd_float[layer].T * engine.h_scale[layer]  # Wd_scale already in Wd_float
             x = x + out
 
         logits = (x @ model.embed.T)[0]
@@ -649,6 +655,13 @@ def train():
             tps = cfg.tokens_per_step / step_time
             total_processed += cfg.tokens_per_step
             losses.append(loss)
+
+            # Time limit check - stop at ~116 min, leave 4 min for save + upload
+            elapsed_total = time.time() - t_start
+            if elapsed_total > 7000:
+                print(f"\nTime limit reached ({elapsed_total/60:.1f} min). Saving and exiting.")
+                model.save(f"{cfg.save_dir}/final.npz")
+                break
 
             # Log
             if step % cfg.log_every == 0 or step == total_steps - 1:
