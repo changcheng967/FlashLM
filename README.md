@@ -2,229 +2,186 @@
 
 **CPU-Native Language Modeling with Ternary Weights.**
 
-FlashLM proves that CPUs aren't just "good enough" — they enable architectural capabilities that GPUs cannot efficiently support. All hidden-layer weights are {-1, 0, +1}. No floating-point multiplications in the core network. Starting with v6.1, the first ternary MoE (Mixture-of-Experts) language model trained entirely on CPU.
+FlashLM proves that CPUs aren't just "good enough" — they enable architectural capabilities that GPUs cannot efficiently support. All hidden-layer weights are {-1, 0, +1}. No floating-point multiplications in the core network.
 
 ---
 
 ## What's New: v6.1 "SUPERNOVA II"
 
-v6.1 is a ground-up rebuild of the SUPERNOVA architecture, fixing the critical issues that held back v6: data starvation (4.4M tokens → 557M tokens), architectural instability (broken EMA → stable gated mixing), and undertrained reasoning modules.
+v6.1 is a ground-up rebuild focused on **CPU kernel engineering**, not architectural complexity. Instead of the v6 approach (complex architecture, slow execution), v6.1 takes the opposite path: the simplest possible ternary architecture, executed as fast as possible through hand-tuned ARM NEON C kernels.
 
-**Hardware:** 96 CPU cores (aarch64), 256 GB RAM — Pencheng Cloudbrain II (OpenI platform).  
-**Status:** Training in progress. 2-hour fixed run on full TinyStories dataset.
+The entire forward and backward pass runs in C with zero NumPy/PyTorch in the hot loop. Every matrix multiplication, normalization, activation, and gradient computation is a hand-written OpenMP+NEON kernel optimized for the Kunpeng 920's cache hierarchy (64 KB L1, 512 KB L2, 24 MB L3 per NUMA node).
+
+**Hardware:** 96 ARM CPU cores (Kunpeng 920, TaiShan v110), 2 TB RAM — Pencheng Cloudbrain II (OpenI platform).  
+**Status:** Training. 2-hour fixed run on TinyStories (685M tokens).
 
 ### What changed from v6
 
-v6 was data-starved. It trained on only 4.4M tokens (3% of TinyStories) on a 2-thread free notebook and hit a data ceiling at PPL 14.0. The P-RCSM reasoning components were too small to prove they helped. v6.1 fixes this:
+v6 tried to ship a complex P-RCSM architecture (multi-scale reasoning banks, hierarchical state gates, slot memory, MoE) on a 2-thread free-tier CPU. Component after component was stripped for speed until only a linear mixer with GLU remained. It achieved 3,500 tok/s but PPL 14.0 — worse than v5.2.
 
-- **128× more data**: 557M tokens from the full TinyStories dataset (vs 4.4M).
-- **Wider model**: d_model 384 (vs 192), following the BitNet b1.58 Reloaded finding that ternary models need ~2× hidden size to match float performance.
-- **MoE**: 4 experts with top-2 routing, ~32M total parameters but only ~12M active per token. This directly addresses the community request for a ternary MoE experiment.
-- **Stable temporal mixing**: The GatedEMAFast module caused training divergence (loss climbed from 5.3 to 8.9+ during the NPU run). Replaced with SimpleGatedMix — a learned interpolation between current and mean-pooled context.
-- **CPU-optimized**: Auto-tunes thread count (benchmarks 16 to num_cores in 30 seconds), memory-mapped dataset, sequence packing (zero padding waste), no GPU/NPU code paths.
+v6.1 takes the opposite approach: **simple architecture, maximum throughput.**
+
+- **No attention, no MoE, no reasoning banks.** Just embedding → RMSNorm → ternary FFN (up + SiLU + down) → residual, repeated 6 times. Every component runs >40,000 tok/s.
+- **All C, all the time.** The training loop calls 13 hand-written C kernels via ctypes. No PyTorch, no NumPy matmuls in the hot loop. The entire `ternary_engine.c` is ~600 lines of ARM NEON + OpenMP.
+- **157× more data than v6:** 685M tokens (full TinyStories) vs 4.4M tokens.
+- **12× faster than v6:** ~43,000 tok/s vs 3,500 tok/s, despite running a full training loop (forward + backward + weight update) not just inference.
+- **Vocab 1024** (reduced from 4096) to keep the logits matrix in L3 cache (268 MB vs 1 GB).
 
 ### Architecture
 
 ```
-Embedding (4096 × 384, float32, weight-tied)
-  → 8× PRCSMBlock:
-      RMSNorm → SimpleGatedMix (stable temporal mixing) + residual
-      RMSNorm → MultiScaleReasoningBank (4 scales, ternary) + residual
-      RMSNorm → HierarchicalStateGate (planner-executor, ternary) + residual
-      RMSNorm → SlotMemoryAttention (16 slots, single matmul) + residual
-      RMSNorm → MoE-TernaryGLU (4 experts, top-2, load-balanced) + residual
-  → RMSNorm → Output Head (tied to embedding)
+Embedding (1024 × 192, float32, weight-tied)
+  × 6 layers:
+    RMSNorm (192)
+    Ternary FFN Up:   192 → 384  {-1, 0, +1} weights, NEON popcount matmul
+    SiLU activation
+    Ternary FFN Down: 384 → 192  {-1, 0, +1} weights, NEON popcount matmul
+    Residual add
+  RMSNorm → Output Head (tied to embedding)
 ```
+
+No attention. No positional encoding. Tokens interact only through the residual stream. This is intentionally minimal — the point of v6.1 is proving the C kernel infrastructure works, not architectural innovation.
 
 ### v6.1 Configuration
 
 ```
-vocab_size:    4096 (BPE)
-d_model:       384
-n_layers:      8
-d_ffn:         768
-d_reason:      128
-n_scales:      4
-n_slots:       16
-n_experts:     4 (top-2 routing)
-max_seq_len:   256
-batch_size:    64
-learning_rate: 5e-4 (cosine decay, 300-step warmup)
-ternary:       ~85% of parameters
-total params:  ~32M (total) / ~12M (active per token)
+vocab_size:       1024 (BPE, trained on TinyStories)
+d_model:          192
+d_ffn:            384
+n_layers:         6
+seq_len:          256
+batch_size:       256 (tokens_per_step = 65,536)
+optimizer:        SGD + momentum (0.9)
+learning_rate:    0.01 (cosine decay, 100-step warmup)
+weight_quantize:  BitNet b1.58 (round to {-1,0,+1} via mean(|W|) threshold)
+total params:     1,082,496 (~1.1M, 4.3 MB float32)
+ternary:          ~100% of hidden weights
+training budget:  2 hours on 96 ARM cores
 ```
+
+### C Kernel Engine
+
+The `ternary_engine.c` file contains 13 kernels, all using ARM NEON SIMD and OpenMP:
+
+```
+ternary_matmul          — Packed binary popcount matmul (forward)
+ternary_transpose_matmul— Weight gradient via scatter-add (backward)
+rmsnorm_f32             — RMS normalization (forward)
+rmsnorm_bwd_f32         — RMS normalization gradient (backward)
+silu_f32                — SiLU activation (forward, in-place)
+silu_bwd_f32            — SiLU gradient (backward)
+requantize_f32          — Float → packed ternary (activation quantization)
+cross_entropy_fwd_bwd   — Fused softmax + CE loss + gradient
+matmul_f32              — Dense float matmul (logits, backward input grads)
+matmul_atb_f32          — A.T @ B matmul (embedding gradient)
+embed_lookup            — Embedding table lookup
+embed_grad_scatter      — Embedding gradient accumulation
+sgd_momentum            — SGD with momentum weight update
+quantize_weights        — Float shadow → packed ternary (BitNet b1.58)
+```
+
+### Performance
+
+| Metric | v6 (2 vCPU) | v6.1 (96 ARM cores) |
+|--------|-------------|---------------------|
+| Throughput | 3,500 tok/s | ~43,000 tok/s |
+| Data seen | 4.4M tokens | ~310M tokens (2h) |
+| Hot loop | PyTorch | Pure C (NEON+OpenMP) |
+| NumPy in loop | Yes | No |
+| Parameters | 4.1M (float32) | 1.1M (ternary) |
 
 ---
 
 ## Model Lineup
 
-| Model | Architecture | Params | Hardware | Train Time | PPL | BPC | Status |
-|---|---|---|---|---|---|---|---|
-| **v6.1 "SUPERNOVA II"** | P-RCSM + MoE | ~32M total / ~12M active | 96 CPU cores / 256 GB | 2h | TBD | TBD | **Training** |
-| **v6 "SUPERNOVA"** | P-RCSM (linear-only) | 4.1M | 2 vCPU / 5 GB | 3h | 14.0 | — | Data-limited |
-| **v5 "Thunderbolt"** | ParallelGatedRecurrence | 29.7M | Ryzen 7950X3D | 40h | **1.36** | **0.44** | Complete |
-| **v5.2 "Nova-Ignition"** | Diff-Attn + MoD | 5.0M | 2 vCPU / 5 GB | 2h | 10.56 | 0.78 | Complete |
-| **v4 "Bolt"** | GatedRecurrence | 4.3M | 2 vCPU / 5 GB | 2h | 15.05 | 0.88 | Archived |
+| Model | Architecture | Params | Hardware | Train Time | Data | PPL | BPC | Status |
+|-------|-------------|--------|----------|------------|------|-----|-----|--------|
+| **v6.1 "SUPERNOVA II"** | Ternary FFN ×6, all-C kernels | 1.1M | 96 ARM cores / 2 TB | 2h | 685M tokens | TBD | TBD | **Training** |
+| **v6 "SUPERNOVA"** | Linear mixer + GLU | 4.1M | 2 vCPU / 5 GB | 3h | 4.4M tokens | 14.0 | — | Data-limited |
+| **v5 "Thunderbolt"** | ParallelGatedRecurrence | 29.7M | Ryzen 7950X3D | 40h | Full TinyStories | **1.36** | **0.44** | Complete |
+| **v5.2 "Nova-Ignition"** | Transformer (RoPE + Attention) | 5.0M | 2 vCPU / 5 GB | 2h | 20M tokens (val split) | 10.56 | 0.78 | Complete |
+| **v4 "Bolt"** | GatedRecurrence | 4.3M | 2 vCPU / 5 GB | 2h | TinyStories subset | 15.05 | 0.88 | Archived |
+
+### Important notes on comparisons
+
+PPL numbers across versions are **not directly comparable**:
+
+- **v5.2** uses float32 weights, self-attention, AdamW optimizer, and vocab 4096. It is a standard transformer.
+- **v6.1** uses ternary {-1,0,+1} weights, no attention, SGD+momentum, and vocab 1024. It is a minimal FFN stack.
+- **v5** trained for 40 hours on a high-end desktop CPU with 29.7M float32 parameters.
+- Smaller vocab (1024 vs 4096) means higher tokens-per-character, making per-token prediction harder.
+
+v6.1's contribution is not beating v5.2 on PPL. It is demonstrating that a complete training pipeline (forward + backward + weight update) can run at 43,000 tok/s on CPU using hand-written C kernels with ternary arithmetic.
 
 ---
 
 ## Why CPU?
 
-The FlashLM thesis isn't "CPUs are faster than GPUs." They're not, for standard parallel workloads. The thesis is that **certain architectural designs are CPU-native** — they exploit capabilities GPUs don't have — and these designs enable efficient deployment on hardware that's already everywhere.
+The FlashLM thesis isn't "CPUs are faster than GPUs." They're not, for standard parallel workloads. The thesis is that **certain architectural designs are CPU-native** — they exploit capabilities GPUs don't have, and these designs enable efficient deployment on hardware that's already everywhere.
 
-Seven CPU advantages FlashLM exploits:
+CPU advantages FlashLM exploits:
 
-**1. Branch Prediction & Conditional Routing.** MoE expert selection and per-token routing exploit CPU branch predictors with 95%+ accuracy. GPUs issue instructions in-order with no branch prediction.
+**1. Ternary Arithmetic.** 100% of hidden weights are {-1, 0, +1}. Matrix multiplication becomes integer popcount on packed binary representations. With ARM NEON, a single `vcntq_u8` instruction counts bits in 16 bytes — processing 128 ternary multiply-accumulates per instruction.
 
-**2. Deep Cache Hierarchy.** Ternary weight matrices are tiny. A 12M-active-parameter model's hot weights fit in L2/L3 cache. Every forward pass hits cache, not DRAM.
+**2. Deep Cache Hierarchy.** The entire 1.1M parameter model fits in L3 cache. Per-layer working set (weights + activations for 65,536 tokens) fits in L2. Forward pass hits cache, not DRAM.
 
-**3. Sequential Chaining.** The P-RCSM reasoning components chain dependent operations: temporal mixing → reasoning bank → state gate → memory → expert selection. CPUs execute dependent instructions with single-digit nanosecond latency.
+**3. OpenMP Parallelism.** 96 cores with static scheduling across the token dimension. Each kernel distributes M=65,536 rows across cores with near-zero synchronization overhead.
 
-**4. Ternary Arithmetic.** 85%+ of weights are {-1, 0, +1}. Matrix-vector multiplication becomes pure integer addition and subtraction. With NEON SIMD (aarch64) or AVX2 (x86), a modern CPU can process 128-256 bits of integer ops per cycle.
+**4. Small-Batch Efficiency.** CPUs work well at any batch size. v6.1 uses batch_size=256 (65,536 tokens per step) and achieves high core utilization without the GPU requirement of massive batches to saturate thousands of shader units.
 
-**5. Irregular Memory Access.** Slot memory uses content-based addressing. CPUs handle this with hardware prefetchers and low L1 latency (~1ns). GPUs suffer 200-800 cycle penalties on irregular access patterns.
-
-**6. Small-Batch Efficiency.** CPUs work well at batch sizes 1-64. GPUs need large batches (256+) to saturate their thousands of cores. FlashLM trains at batch 64 with full hardware utilization on 96 cores.
-
-**7. MoE Routing Overhead.** Expert selection involves conditional logic, gather/scatter operations, and variable-length batching per expert — all CPU-friendly operations that GPUs handle with padding and wasted compute.
+**5. No Framework Overhead.** The hot loop is 13 C function calls via ctypes. No PyTorch graph construction, no autograd tape, no CUDA kernel launch latency. Python overhead is <5% of step time.
 
 ---
 
-## The Architecture
+## The Engineering Story
 
-### Ternary Weights (BitLinear 1.58-bit)
+v6.1's development was primarily a systems optimization project, not an architecture research project. The journey:
 
-Every hidden-layer weight is quantized to {-1, 0, +1} using a Straight-Through Estimator with median-based scaling (following BitNet b1.58 Reloaded):
+1. **Baseline:** PyTorch training on 96 cores → 8,000 tok/s. Python/NumPy overhead dominated.
+2. **C kernels:** Replaced all hot-loop operations with hand-written C → 28,000 tok/s. Cache thrashing from 1 GB logits matrix was the new bottleneck.
+3. **Vocab reduction:** V=4096→1024, logits matrix 1 GB→268 MB (fits in L3) → 43,000 tok/s.
+4. **Gradient debugging:** Hand-written backward pass required fixing: rmsnorm aliasing (in-place overwrote data needed by backward), non-contiguous `.T` passed to C kernels, missing activation scales on ternary weight gradients, embedding gradient explosion through unscaled residual chain.
+5. **Hardware profiling:** Measured 77 GB/s aggregate DRAM bandwidth (parallel), 6.4 GB/s single-thread. L3 partition mode on Kunpeng 920 means 4 MB fast + gradual expansion to 24 MB. Optimal thread count is 96 (not 192 — wgrad scatter-add contention).
 
-```
-Forward:  scale = median(|w|) + ε
-          w_q = clamp(round(w / scale), -1, +1)
-Backward: gradients pass through as if no quantization occurred (STE)
-Result:   matmul becomes add/subtract → ~4× memory reduction
-```
-
-### P-RCSM: Parallel Recursive Compositional State Machine
-
-The core block that replaces attention. Each PRCSMBlock contains five sub-modules executed sequentially with residual connections:
-
-**SimpleGatedMix** — Stable temporal mixing via learned interpolation between the current token representation and a mean-pooled context summary. Replaces the unstable GatedEMAFast from v6 that caused training divergence.
-
-**MultiScaleReasoningBank** — Projects input through ternary linear layers at 4 temporal scales, blended by a learned soft router. Provides multi-resolution context without convolutions.
-
-**HierarchicalStateGate** — A compact "planner" state gates a larger "executor" state. The planner updates from mean-pooled summaries, providing implicit adaptive computation depth without Python loops.
-
-**SlotMemoryAttention** — 16 learned memory slots accessed via a single batched matmul. Tokens query all slots in parallel. No sequential read/write — one operation replaces attention over a memory bank.
-
-**MoE-TernaryGLU** — 4 ternary GLU experts with top-2 routing and load-balancing loss. Each expert is a gate-up-down projection with SiLU activation using BitLinear weights. The router selects 2 of 4 experts per token, so only ~50% of FFN parameters are active at any time.
-
-### Parameter Budget (v6.1)
-
-```
-Embedding:        4096 × 384          = 1,572,864  (float32, weight-tied)
-8× PRCSMBlock:
-  SimpleGatedMix:  8 × ~300K          ≈ 2,400,000  (ternary)
-  ReasoningBank:   8 × ~400K          ≈ 3,200,000  (ternary)
-  StateGate:       8 × ~200K          ≈ 1,600,000  (ternary)
-  SlotMemory:      8 × ~150K          ≈ 1,200,000  (mixed)
-  MoE-GLU:         8 × 4 experts × ~700K ≈ 22,400,000  (ternary)
-Output head:       (tied)             =          0
-Norms + routers:                      ≈    600,000  (float32)
-─────────────────────────────────────────────────────
-Total:                                ≈ 32M parameters
-Active per token:                     ≈ 12M (top-2 of 4 experts)
-Ternary:                              ≈ 85%
-```
-
----
-
-## Training
-
-### v6.1 "SUPERNOVA II" (current)
-
-Trained on the full TinyStories dataset (557M tokens) on Pencheng Cloudbrain II (96 CPU cores, 256 GB RAM). Fixed 2-hour training window with automatic checkpointing.
-
-```bash
-# Install
-pip install torch numpy tokenizers
-
-# Run training (auto-detects CPU cores, tunes thread count)
-python train_v61.py
-
-# Training automatically stops after 2 hours and saves the best model
-```
-
-The script handles everything: builds a BPE tokenizer if needed, tokenizes raw text to binary files, auto-tunes thread count, trains with cosine LR schedule, evaluates on validation set, and saves checkpoints.
-
-### v5 "Thunderbolt"
-
-40 hours on AMD Ryzen 7950X3D. 29.7M parameters. PPL 1.36, BPC 0.44.
-
-```bash
-python train.py --large
-```
-
-### v5.2 "Nova-Ignition"
-
-2 hours on free-tier cloud CPU. 5M parameters. PPL 10.56, BPC 0.78.
-
-```bash
-python train_v52.py
-```
-
----
-
-## Results
-
-### v5 "Thunderbolt" (Complete)
-
-| Metric | FlashLM v5 | TinyStories-1M Baseline |
-|---|---|---|
-| Parameters | 29.7M | 1M |
-| Perplexity | **1.36** | 1.59 |
-| BPC | **0.44** | — |
-| Training | 40h CPU | ~24h GPU |
-| MatMul-free | Yes | No |
-
-First CPU-trained model to beat the TinyStories-1M baseline.
-
-### v6 "SUPERNOVA" (Data-Limited)
-
-v6 achieved PPL 14.0 on a 2-thread free notebook with only 4.4M tokens — 3% of the dataset. The architecture worked but was starved for data. An independent replication by u/thedrachmalobby on an RTX 6000 achieved PPL 11.0 in 2 minutes (242K tok/s, 4 epochs), confirming that v6's quality ceiling was data-limited, not architecture-limited. See the [full transparency note](#transparency-note) below.
-
-### v6.1 "SUPERNOVA II" (In Progress)
-
-| Metric | v6 (Deepnote) | v6 on RTX 6000 | v6.1 Target |
-|---|---|---|---|
-| Parameters | 4.1M | 4.1M | ~32M total / ~12M active |
-| Data seen | 4.4M tokens | 16.6M tokens | 557M+ tokens |
-| Hardware | 2 vCPU / 5 GB | RTX 6000 | 96 CPU / 256 GB |
-| PPL | 14.0 | 11.0 | < 8.0 |
-| BPC | — | — | < 0.65 |
-| MoE | No | No | Yes (4 experts, top-2) |
+The lesson: replacing PyTorch with C gives a 5× speedup, but you inherit responsibility for every numerical detail that autograd handles automatically. Five distinct gradient-flow bugs were found and fixed during development.
 
 ---
 
 ## Transparency Note
 
-v6 was announced with an ambitious P-RCSM architecture featuring multi-scale convolutional reasoning banks, hierarchical planner-executor state gates, dynamic associative slot memory, and a 16-operation soft router. During training on the free-tier 2-thread CPU, component after component had to be stripped or shrunk due to speed constraints. By the time the model was trainable at reasonable speed, the "novel architecture" was essentially a linear mixer with a GLU.
+**v6** was announced with a P-RCSM architecture featuring multi-scale convolutional reasoning banks, hierarchical planner-executor state gates, dynamic associative slot memory, and a 16-operation soft router. During training on a free-tier 2-thread CPU, component after component was stripped for speed. The shipped model was a linear mixer with GLU — not the announced architecture. PPL 14.0 vs v5.2's 10.56.
 
-v6 achieved 3,500 tok/s (a genuine speed win) but PPL 14.0 versus v5.2's 10.56. It did not beat the previous version. The architecture that was announced is not the architecture that shipped.
+**v6.1** is exactly what it claims to be: a 6-layer ternary FFN trained with hand-written C kernels. No attention, no MoE, no reasoning banks, no slot memory. The architecture is intentionally minimal. The contribution is the kernel engineering and the proof that a full training pipeline can run at >40,000 tok/s on ARM CPUs without any ML framework.
 
-Going forward, every FlashLM version is prototyped and validated on the target hardware before public claims are made. v6.1 has been designed from the start for the hardware it actually runs on.
+The GitHub README describes only what is implemented and shipped. Future architectural additions (attention, MoE, larger models) will be prototyped and benchmarked on target hardware before being announced.
 
 ---
 
 ## Files
 
 | File | Description |
-|---|---|
-| `train_v61.py` | v6.1 SUPERNOVA II training (2h, 96 CPU cores, full TinyStories) |
+|------|-------------|
+| `train.py` | v6.1 training script (2h, 96 ARM cores, all-C kernels) |
+| `ternary_engine.c` | ARM NEON + OpenMP kernel library (13 kernels, ~600 LOC) |
 | `train_v6.py` | v6 SUPERNOVA training (Deepnote free tier) |
 | `test_v6.py` | v6 architecture smoke test (13 tests) |
 | `train_v52.py` | v5.2 Nova-Ignition training script |
 | `train.py` | v5 Thunderbolt training script |
 | `trainv4.py` | v4 Bolt (archived) |
 | `eval_bpc.py` | BPC evaluation script |
+
+---
+
+## Running v6.1
+
+```bash
+# Requires: gcc with OpenMP, ARM NEON support (aarch64), Python 3.9+, numpy, tokenizers
+
+# The script compiles ternary_engine.c automatically
+OMP_NUM_THREADS=96 OPENBLAS_NUM_THREADS=1 python3 train.py
+
+# Training stops after 2 hours, saves checkpoint, uploads output
+```
 
 ---
 
@@ -235,55 +192,51 @@ Going forward, every FlashLM version is prototyped and validated on the target h
 - **v5 Model:** [huggingface.co/changcheng967/flashlm-v5-thunderbolt](https://huggingface.co/changcheng967/flashlm-v5-thunderbolt)
 - **v5 Demo:** [huggingface.co/spaces/changcheng967/flashlm-v5-demo](https://huggingface.co/spaces/changcheng967/flashlm-v5-demo)
 - **v5.2 Demo:** [huggingface.co/spaces/changcheng967/Flashlm_V5.2_Demo](https://huggingface.co/spaces/changcheng967/Flashlm_V5.2_Demo)
-- **Reddit (v6):** [r/LocalLLaMA — FlashLM v6 "SUPERNOVA"](https://www.reddit.com/r/LocalLLaMA/comments/1rdv74o/flashlm_v6_supernova_41m_ternary_model_hits_3500/)
-- **Reddit (v5):** [r/LocalLLaMA — I Trained a Language Model on CPU for 40 Hours](https://www.reddit.com/r/LocalLLaMA/comments/1rbafs8/i_trained_a_language_model_on_cpu_for_40_hours_it/)
+- **Reddit (v6):** [r/LocalLLaMA FlashLM v6](https://www.reddit.com/r/LocalLLaMA/comments/1rdv74o/flashlm_v6_supernova_41m_ternary_model_hits_3500/)
+- **Reddit (v5):** [r/LocalLLaMA FlashLM v5](https://www.reddit.com/r/LocalLLaMA/comments/1rbafs8/i_trained_a_language_model_on_cpu_for_40_hours_it/)
 
 ---
 
 ## Evolution
 
 ```
-v4 "Bolt"            4.3M params    PPL 15.05   BPC 0.88   2h on 2 vCPU
-    │
-    ▼
-v5.2 "Nova-Ignition"  5.0M params    PPL 10.56   BPC 0.78   2h on 2 vCPU
-    │
-    ▼
-v5 "Thunderbolt"     29.7M params    PPL 1.36    BPC 0.44   40h on Ryzen 7950X3D
-    │
-    ▼
-v6 "SUPERNOVA"       4.1M params     PPL 14.0    —          3h on 2 vCPU (data-limited)
-    │
-    ▼
-v6.1 "SUPERNOVA II"  ~32M / ~12M active   TBD   TBD   2h on 96 CPU cores + MoE
+v4 "Bolt"              4.3M params    PPL 15.05   2h on 2 vCPU     (PyTorch, float32)
+  ↓
+v5.2 "Nova-Ignition"   5.0M params    PPL 10.56   2h on 2 vCPU     (PyTorch, float32, attention)
+  ↓
+v5 "Thunderbolt"      29.7M params    PPL 1.36    40h on Ryzen      (PyTorch, float32)
+  ↓
+v6 "SUPERNOVA"         4.1M params    PPL 14.0    3h on 2 vCPU     (PyTorch, ternary, data-starved)
+  ↓
+v6.1 "SUPERNOVA II"    1.1M params    PPL TBD     2h on 96 ARM     (Pure C, ternary, 43K tok/s)
 ```
 
 ---
 
 ## Research Direction
 
-FlashLM explores whether ternary-weight, CPU-native architectures can produce competitive language models without GPU training or inference. The core hypothesis is that combining 1.58-bit quantization-aware training (BitNet b1.58), sparse expert routing (MoE), and CPU-friendly sequential reasoning modules (P-RCSM) yields models that are both small enough for edge deployment and good enough for practical use as draft models, routers, or standalone generators.
+FlashLM explores whether CPU-native, ternary-weight training pipelines can be practical. v6.1 answers one specific question: **can you train a language model at >40,000 tokens/second on CPU without any ML framework?** The answer is yes, using packed binary arithmetic, NEON SIMD, and OpenMP parallelism.
 
-Key research questions for v6.1 and beyond: Does the ternary MoE architecture match float-weight models of equivalent active parameter count on TinyStories? Do the P-RCSM reasoning modules (reasoning bank, state gate, slot memory) measurably improve performance over a plain ternary MoE baseline? Can the architecture generalize beyond children's stories to broader text and code?
+Open questions for future versions:
+- Can attention be added while maintaining >30,000 tok/s? (Requires a C implementation of causal attention with O(n²) scaling at seq_len=256.)
+- Does increasing d_model from 192 to 384 (following BitNet b1.58 Reloaded's 2× width recommendation) improve PPL enough to justify the ~4× compute cost?
+- Can the C kernel approach scale to 10M+ parameter ternary models within a 2-hour training budget?
 
 ---
 
 ## References
 
 - [The Era of 1-bit LLMs — BitNet b1.58](https://arxiv.org/abs/2402.17764) (Ma et al., 2024)
-- [BitNet b1.58 Reloaded: State-of-the-art Performance Also on Smaller Networks](https://arxiv.org/abs/2407.09527) (Nielsen et al., 2024)
+- [BitNet b1.58 Reloaded](https://arxiv.org/abs/2407.09527) (Nielsen et al., 2024)
 - [Scalable MatMul-free Language Modeling](https://arxiv.org/abs/2406.02528) (Zhu et al., 2024)
-- [TinyStories: How Small Can Language Models Be and Still Speak Coherent English?](https://arxiv.org/abs/2305.07759) (Eldan & Li, 2023)
-- [Neural Turing Machines](https://arxiv.org/abs/1410.5401) (Graves et al., 2014)
-- [Adaptive Computation Time for Recurrent Neural Networks](https://arxiv.org/abs/1603.08983) (Graves, 2016)
-- [Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer](https://arxiv.org/abs/1701.06538) (Shazeer et al., 2017)
+- [TinyStories](https://arxiv.org/abs/2305.07759) (Eldan & Li, 2023)
 
 ---
 
 ## Acknowledgments
 
 - **arki05** for providing the AMD Ryzen 7950X3D used to train v5 Thunderbolt.
-- **Pencheng Lab / OpenI** for access to Pencheng Cloudbrain II (4× Ascend 910 Pro A, 96 CPU cores, 256 GB RAM) used for v6.1 training.
+- **Pencheng Lab / OpenI** for access to Pencheng Cloudbrain II (96 ARM CPU cores, 2 TB RAM) used for v6.1 training.
 - **u/thedrachmalobby** for independently replicating v6 on RTX 6000 and confirming the data-limitation hypothesis (PPL 11.0 in 2 minutes).
 - Code and technical writing assisted by **Claude** (Anthropic). Architecture design and research direction by changcheng967.
 
