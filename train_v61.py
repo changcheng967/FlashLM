@@ -66,18 +66,21 @@ for name, types in [
     ('cross_entropy_fwd_bwd',       [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
     ('ternary_transpose_matmul_f32',[ctypes.c_void_p]*4 + [ctypes.c_int]*3),
     ('matmul_f32',                  [ctypes.c_void_p]*3 + [ctypes.c_int]*3),
+    ('matmul_atb_f32',              [ctypes.c_void_p]*3 + [ctypes.c_int]*3),
     ('embed_lookup',                [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
     ('embed_grad_scatter',          [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
     ('quantize_weights',            [ctypes.c_void_p]*3 + [ctypes.c_void_p] + [ctypes.c_int]*2),
     ('unpack_ternary_f32',          [ctypes.c_void_p]*3 + [ctypes.c_int]*2),
     ('sgd_momentum',                [ctypes.c_void_p]*3 + [ctypes.c_int] + [ctypes.c_float]*3),
     ('add_f32',                     [ctypes.c_void_p]*3 + [ctypes.c_int]),
+    ('mean_abs_f32',                [ctypes.c_void_p, ctypes.c_int]),
 ]:
     fn = getattr(lib, name, None)
     if fn is not None:
         fn.argtypes = types
 
 lib.cross_entropy_fwd_bwd.restype = ctypes.c_float
+lib.mean_abs_f32.restype = ctypes.c_float
 
 # ============================================================
 # 3. HYPERPARAMETERS
@@ -97,7 +100,7 @@ class Config:
     lr_min      = 1e-4
     warmup_steps= 100
     momentum    = 0.9
-    grad_clip   = 1.0
+    grad_clip   = 0.0   # disable - gradients are healthy after rmsnorm fix
     max_epochs  = 1
 
     # Validation & Generation
@@ -284,8 +287,9 @@ class TrainEngine:
         KB  = cfg.KB
         KBf = cfg.KBf
 
-        # Per-layer activation storage (NO h_pre — recompute in backward)
-        self.x       = [np.zeros((M, D), dtype=np.float32) for _ in range(L + 1)]
+        # Per-layer activation storage
+        self.x       = [np.zeros((M, D), dtype=np.float32) for _ in range(L + 1)]  # Original residual stream
+        self.xn      = [np.zeros((M, D), dtype=np.float32) for _ in range(L)]  # Normalized output (separate buffer!)
         self.xn_val  = [np.zeros((M, KB), dtype=np.uint8) for _ in range(L)]
         self.xn_sign = [np.zeros((M, KB), dtype=np.uint8) for _ in range(L)]
         self.xn_scale= [np.float32(0) for _ in range(L)]
@@ -304,12 +308,16 @@ class TrainEngine:
         # Two dx buffers for pointer swap
         self.dxA = np.zeros((M, D), dtype=np.float32)
         self.dxB = np.zeros((M, D), dtype=np.float32)
+        self.dx_rms = np.zeros((M, D), dtype=np.float32)  # Separate buffer for rmsnorm_bwd output
 
         # Other gradients
         self.dh       = np.zeros((M, FFN), dtype=np.float32)
         self.dh_silu  = np.zeros((M, FFN), dtype=np.float32)
         self.dW_up    = np.zeros((D, FFN), dtype=np.float32)
         self.dW_down  = np.zeros((FFN, D), dtype=np.float32)
+        # Contiguous transpose buffers for SGD (avoid .T non-contiguous bug)
+        self.dW_up_T   = np.zeros((FFN, D), dtype=np.float32)
+        self.dW_down_T = np.zeros((D, FFN), dtype=np.float32)
         self.d_gamma  = np.zeros(D, dtype=np.float32)
         self.d_embed  = np.zeros((V, D), dtype=np.float32)
 
@@ -327,6 +335,7 @@ class TrainEngine:
 
         # Embedding transpose buffer for logits matmul
         self.embed_T = np.zeros((D, V), dtype=np.float32)
+        self._embed_T_dirty = True  # Track if embed_T needs refresh
 
     def quantize_all_weights(self):
         """Quantize shadow weights to ternary for forward/backward."""
@@ -350,14 +359,14 @@ class TrainEngine:
                          self.x[0].ctypes.data, M, D)
 
         for layer in range(L):
-            # RMSNorm (C)
+            # RMSNorm (C) - output to separate xn buffer, keep x[layer] as original
             lib.rmsnorm_f32(self.x[layer].ctypes.data, self.model.gamma[layer].ctypes.data,
-                            self.x[layer].ctypes.data, M, D)  # in-place on x[layer]
+                            self.xn[layer].ctypes.data, M, D)
 
-            # Requantize (C)
-            lib.requantize_f32(self.x[layer].ctypes.data, self.xn_val[layer].ctypes.data,
+            # Requantize (C) - use xn (normalized), not x (original)
+            lib.requantize_f32(self.xn[layer].ctypes.data, self.xn_val[layer].ctypes.data,
                                self.xn_sign[layer].ctypes.data, M, D)
-            self.xn_scale[layer] = np.float32(np.mean(np.abs(self.x[layer])) + 1e-8)
+            self.xn_scale[layer] = np.float32(lib.mean_abs_f32(self.xn[layer].ctypes.data, M * D) + 1e-8)
 
             # Up projection (C ternary)
             lib.ternary_matmul(self.xn_val[layer].ctypes.data, self.xn_sign[layer].ctypes.data,
@@ -372,7 +381,7 @@ class TrainEngine:
             # Requantize hidden (C)
             lib.requantize_f32(self.h_act.ctypes.data, self.hv[layer].ctypes.data,
                                self.hs[layer].ctypes.data, M, FFN)
-            self.h_scale[layer] = np.float32(np.mean(np.abs(self.h_act)) + 1e-8)
+            self.h_scale[layer] = np.float32(lib.mean_abs_f32(self.h_act.ctypes.data, M * FFN) + 1e-8)
 
             # Down projection (C ternary)
             lib.ternary_matmul(self.hv[layer].ctypes.data, self.hs[layer].ctypes.data,
@@ -385,8 +394,10 @@ class TrainEngine:
             lib.add_f32(self.x[layer].ctypes.data, self.down_out.ctypes.data,
                         self.x[layer + 1].ctypes.data, M * D)
 
-        # Logits: x[L] @ embed.T using C matmul
-        np.copyto(self.embed_T, self.model.embed.T)
+        # Logits: x[L] @ embed.T using C matmul (lazy embed_T update)
+        if self._embed_T_dirty:
+            np.copyto(self.embed_T, self.model.embed.T)
+            self._embed_T_dirty = False
         lib.matmul_f32(self.x[L].ctypes.data, self.embed_T.ctypes.data,
                        self.logits.ctypes.data, M, D, V)
 
@@ -410,15 +421,11 @@ class TrainEngine:
         lib.matmul_f32(self._ce_grad.ctypes.data, self.model.embed.ctypes.data,
                        self.dxA.ctypes.data, M, V, D)
 
-        # d_embed = ce_grad.T @ x_final: use matmul_atb_f32
-        # d_embed[V,D] = ce_grad.T[V,M] @ x_final[M,D]
+        # d_embed = ce_grad.T @ x_final: use matmul_atb_f32 (avoids 256MB transpose)
+        # d_embed[V,D] = ce_grad.T[V,M] @ x_final[M,D] = ce_grad[M,V].T @ x_final[M,D]
         self.d_embed[:] = 0
-        # Manual transpose + matmul for d_embed
-        # d_embed[v,d] = sum_i ce_grad[i,v] * x_final[i,d]
-        # This is equivalent to: d_embed = (ce_grad.T @ x_final)
-        ce_grad_T = self._ce_grad.T.copy()
-        lib.matmul_f32(ce_grad_T.ctypes.data, self._final_x.ctypes.data,
-                       self.d_embed.ctypes.data, V, M, D)
+        lib.matmul_atb_f32(self._ce_grad.ctypes.data, self._final_x.ctypes.data,
+                           self.d_embed.ctypes.data, M, V, D)
 
         # Pointer swap: dx_cur points to current dx, dx_sav points to previous
         dx_cur = self.dxA
@@ -456,20 +463,31 @@ class TrainEngine:
             lib.matmul_f32(self.dh_silu.ctypes.data, self.Wu_float[layer].ctypes.data,
                            dx_cur.ctypes.data, M, FFN, D)
 
-            # RMSNorm backward (C)
+            # RMSNorm backward (C) - uses ORIGINAL x[layer], outputs to dx_rms
             self.d_gamma[:] = 0
             lib.rmsnorm_bwd_f32(self.x[layer].ctypes.data, self.model.gamma[layer].ctypes.data,
-                                dx_cur.ctypes.data, self.d_gamma.ctypes.data, dx_cur.ctypes.data, M, D)
+                                dx_cur.ctypes.data, self.d_gamma.ctypes.data,
+                                self.dx_rms.ctypes.data, M, D)
 
-            # Residual gradient: dx_cur = dx_cur + dx_sav
-            lib.add_f32(dx_cur.ctypes.data, dx_sav.ctypes.data, dx_cur.ctypes.data, M * D)
+            # Residual gradient: dx_cur = dx_rms + dx_sav
+            lib.add_f32(self.dx_rms.ctypes.data, dx_sav.ctypes.data, dx_cur.ctypes.data, M * D)
 
-            # Update weights with SGD momentum
-            lib.sgd_momentum(self.model.W_up[layer].ctypes.data, self.dW_up.T.ctypes.data,
+            # Gradient clipping (per-layer)
+            grad_norm = np.sqrt(np.sum(self.dW_up**2) + np.sum(self.dW_down**2) + np.sum(self.d_gamma**2))
+            if grad_norm > cfg.grad_clip:
+                clip_scale = cfg.grad_clip / (grad_norm + 1e-6)
+                self.dW_up *= clip_scale
+                self.dW_down *= clip_scale
+                self.d_gamma *= clip_scale
+
+            # Update weights with SGD momentum (use contiguous transpose buffers)
+            np.copyto(self.dW_up_T, self.dW_up.T)
+            lib.sgd_momentum(self.model.W_up[layer].ctypes.data, self.dW_up_T.ctypes.data,
                              self.model.m_W_up[layer].ctypes.data, D * FFN,
                              ctypes.c_float(self._current_lr), ctypes.c_float(cfg.momentum), ctypes.c_float(0.0))
 
-            lib.sgd_momentum(self.model.W_down[layer].ctypes.data, self.dW_down.T.ctypes.data,
+            np.copyto(self.dW_down_T, self.dW_down.T)
+            lib.sgd_momentum(self.model.W_down[layer].ctypes.data, self.dW_down_T.ctypes.data,
                              self.model.m_W_down[layer].ctypes.data, FFN * D,
                              ctypes.c_float(self._current_lr), ctypes.c_float(cfg.momentum), ctypes.c_float(0.0))
 
@@ -481,14 +499,20 @@ class TrainEngine:
         if dx_cur is not self.dxA:
             np.copyto(self.dxA, dx_cur)
 
+        # Gradient clipping for embedding
+        embed_grad_norm = np.sqrt(np.sum(self.d_embed**2))
+        if embed_grad_norm > cfg.grad_clip:
+            self.d_embed *= cfg.grad_clip / (embed_grad_norm + 1e-6)
+
         # Embedding gradient from input (scatter)
         lib.embed_grad_scatter(self.d_embed.ctypes.data, self._input_ids.ctypes.data,
                                self.dxA.ctypes.data, M, D)
 
-        # Update embedding
+        # Update embedding and mark embed_T as dirty
         lib.sgd_momentum(self.model.embed.ctypes.data, self.d_embed.ctypes.data,
                          self.model.m_embed.ctypes.data, V * D,
                          ctypes.c_float(self._current_lr), ctypes.c_float(cfg.momentum), ctypes.c_float(0.0))
+        self._embed_T_dirty = True
 
     def step(self, input_ids, target_ids, step_num, total_steps):
         if step_num < cfg.warmup_steps:
@@ -537,8 +561,8 @@ def generate(model, engine, tokenizer, prompt, cfg, max_tokens=64, temperature=1
     D, FFN, L = cfg.d_model, cfg.d_ffn, cfg.n_layers
 
     for _ in range(max_tokens):
-        # Single token forward
-        x = model.embed[generated[-1]:generated[-1]].copy()
+        # Single token forward - fix: use [id:id+1] not [id:id]
+        x = model.embed[generated[-1]:generated[-1]+1].copy()
 
         for layer in range(L):
             # RMSNorm

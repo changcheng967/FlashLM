@@ -388,6 +388,14 @@ void int32_to_float32(const int32_t* src, float* dst, int n, float scale) {
     for (int i = 0; i < n; i++) dst[i] = (float)src[i] * scale;
 }
 
+/* ===== MEAN ABSOLUTE VALUE ===== */
+float mean_abs_f32(const float* x, int n) {
+    double sum = 0.0;
+    #pragma omp parallel for reduction(+:sum) schedule(static, 4096)
+    for (int i = 0; i < n; i++) sum += fabsf(x[i]);
+    return (float)(sum / n);
+}
+
 /* ===== ELEMENT-WISE OPS ===== */
 void add_f32(const float* a, const float* b, float* out, int n) {
     #pragma omp parallel for schedule(static, 4096)
