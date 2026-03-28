@@ -141,8 +141,8 @@ Why this matters:
 ## Acknowledgments
 
 - **arki05** for providing the AMD Ryzen 7950X3D used to train v5 Thunderbolt.
-- **u/thedrachmalobby** for independently replicating v6 on RTX 6000 and confirming the data-limitation hypothesis.
-- Architecture design and research direction by changcheng967.
+- **u/thedrachmallobby** for independently replicating v6 on RTX 6000 and confirming the data-limitation hypothesis.
+- Code assistance by **Claude Code** (Anthropic). Architecture design and research direction by changcheng967.
 
 ---
 
