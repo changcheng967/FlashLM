@@ -1,31 +1,37 @@
 # FlashLM
 
-**CPU-Native Language Modeling with Ternary Weights → Adaptive Depth Research.**
+**CPU-Native Language Modeling with Ternary Weights → CORTEX Architecture Research.**
 
-FlashLM explores ternary-weight ({-1, 0, +1}) language models, from hand-written C kernels on ARM CPUs to novel adaptive-depth architectures on CPU. Every version is trained from scratch with a fixed time budget on whatever hardware is available.
+FlashLM explores brain-inspired language model architectures on CPU. The **CORTEX** architecture processes percepts (not tokens), uses predictive coding (process only surprises), and leverages CPU branch prediction for conditional computation. Every version is trained from scratch with a fixed time budget.
 
 ---
 
-## What's New: v7 — Adaptive Depth Experiments
+## What's New: v7 — CORTEX Architecture
 
-v7 explores a new direction: **adaptive-depth inference** where tokens exit the network early based on prediction confidence. This leverages a CPU advantage — branch prediction handles conditional computation natively, while GPU suffers from thread divergence.
+v7 introduces **CORTEX**: a brain-inspired architecture that challenges the assumption that Intelligence = Parameters x Data x Compute. Instead of processing everything like a Transformer, CORTEX predicts first and only computes what's surprising — like the human brain.
+
+### Core Principles
+
+1. **Predictive coding**: Only process prediction errors, skip the predictable (like the brain)
+2. **Percepts, not tokens**: Think in concepts, not character chunks (Exp 1-3 used tok/s; Exp 4+ uses percept/s)
+3. **CPU-native**: Conditional computation maps to CPU branch prediction; GPUs suffer from thread divergence
 
 ### Core Insight
 
 An adaptive-depth model where easy tokens (common words, punctuation) exit at layer 2 and hard tokens (rare words, complex grammar) go through all 6 layers should be **faster on CPU** than a fixed-depth model at the same quality — because CPU branch prediction handles the conditional skips for free.
 
-### Experiment 3 Results (Latest)
+### Adaptive Depth Results (Exp 1-3)
 
 | Metric | Fixed 6-Layer | Fixed 2-Layer | Adaptive-Depth |
 |--------|--------------|---------------|----------------|
 | Parameters | 3,969,024 | 1,446,210 | 4,095,363 |
 | Perplexity | 5.39 | 5.76 | **5.34** |
-| Inference tok/s | 63.6 | 190.1 | **120.7** |
+| Inference speed | 63.6 tok/s | 190.1 tok/s | **120.7 tok/s** |
 | Speedup vs 6L | 1.0× | 2.99× | **1.90×** |
-| Exit distribution | all at layer 6 | all at layer 2 | **{2: 284, 4: 216, 6: 0}** |
+| Exit distribution | all at layer 6 | all at layer 2 | **{2: 284, : 216, 6: 0}** |
 | Layer-steps saved | 0% | 66.7% | **52.3%** |
 
-**Breakthrough:** The adaptive model achieves **better perplexity (5.34)** than the fixed 6-layer model (5.39) while being **1.90× faster**. Tokens discriminate: 56.8% exit at layer 2, 43.2% exit at layer 4. The 2-layer baseline (PPL 5.76) proves deeper layers genuinely matter — the adaptive model isn't just running a shallow network.
+*Note: Exp 1-3 used tok/s. From Exp 4 onward, CORTEX reports in **percept/s** (1 percept = 1 meaningful concept unit; at char-level, 1 percept ≈ 1 token).*
 
 ### Per-Exit Perplexity
 
@@ -34,6 +40,20 @@ An adaptive-depth model where easy tokens (common words, punctuation) exit at la
 | Layer 2 only | 6.34 |
 | Layer 4 only | 5.50 |
 | Layer 6 (final) | 5.34 |
+
+**Proven:** Adaptive depth works — better PPL (5.34 vs 5.39) at 1.90× speed. Tokens discriminate between easy and hard.
+
+### CORTEX Roadmap
+
+| # | Principle | Status |
+|---|-----------|--------|
+| 4 | Predictive coding (skip predictable channel-mix) | **Script ready** |
+| 5 | Learned sparse representations | Planned |
+| 6 | Concept-space prediction (percepts, not tokens) | Planned |
+| 7 | Hash-based fast memory | Planned |
+| 8 | Dual-speed learning | Planned |
+| 9 | Built-in grammar (surface realizer) | Planned |
+| 10 | Integration → CORTEX v7 | After individual validation |
 
 ### Experiment History
 
@@ -51,7 +71,7 @@ See `v7/experiment1_results.md`, `v7/experiment2_results.md`, and `v7/experiment
 
 | Model | Architecture | Params | Hardware | Train Time | Data | PPL | BPC | Status |
 |---|---|---|---|---|---|---|---|---|
-| **v7 Adaptive-Depth** | RWKV + entropy-based early exit | 4.1M | 4 CPU cores | 44min | TinyStories 19M tok | **5.34** | — | **Experiment 3 complete** |
+| **v7 CORTEX** | RWKV + predictive coding (adaptive depth) | 4.1M | 4 CPU cores | 44min | TinyStories 19M tok | **5.34** | — | **Exp 3 done, Exp 4 ready** |
 | **v6 "SUPERNOVA"** | Linear mixer + GLU | 4.1M | 2 vCPU / 5 GB | 3h | 4.4M tokens | 14.0 | — | Data-limited |
 | **v5 "Thunderbolt"** | ParallelGatedRecurrence | 29.7M | Ryzen 7950X3D | 40h | Full TinyStories | **1.36** | **0.44** | Complete |
 | **v5.2 "Nova-Ignition"** | Transformer (RoPE + Attention) | 5.0M | 2 vCPU / 5 GB | 2h | 20M tokens | 10.56 | 0.78 | Complete |
@@ -70,20 +90,20 @@ v5 "Thunderbolt"      29.7M params    PPL 1.36    40h on Ryzen        (PyTorch, 
   ↓
 v6 "SUPERNOVA"         4.1M params    PPL 14.0    3h on 2 vCPU       (PyTorch, ternary, data-starved)
   ↓
-v7 Adaptive-Depth      4.1M params    PPL 5.34    44min on 4 CPU     (PyTorch, RWKV + early exit, 1.90× speedup, token discrimination)
+v7 CORTEX              4.1M params    PPL 5.34    44min on 4 CPU     (PyTorch, adaptive depth + predictive coding, 1.90× speedup)
 ```
 
-The trajectory: from 2-thread free-tier CPUs, proving ternary weights work, to adaptive-depth architectures that leverage CPU's native advantages. Experiment 3 achieves token-level discrimination with better perplexity than fixed-depth at 1.90× the speed.
+The trajectory: from 2-thread free-tier CPUs, proving ternary weights work, to CORTEX — a brain-inspired architecture that predicts first and only processes surprises. Each principle is validated individually before integration.
 
 ---
 
-## Why Adaptive Depth on CPU?
+## Why CORTEX on CPU?
 
 The fundamental asymmetry:
 - **GPU**: Parallel execution means all threads must agree on which layer to run. Early-exit causes thread divergence → wasted compute.
 - **CPU**: Branch prediction + speculative execution handles conditional depth natively. Skipping layers is essentially free.
 
-An adaptive-depth model that processes easy tokens in 2 layers and hard tokens in 6 should be significantly faster on CPU than a fixed 6-layer model at the same quality. Experiment 3 confirms this: **1.90× speedup with better perplexity (5.34 vs 5.39)**, with 56.8% of tokens exiting at layer 2 and 43.2% at layer 4.
+An adaptive-depth model that processes easy tokens in 2 layers and hard tokens in 6 should be significantly faster on CPU than a fixed 6-layer model at the same quality. Experiment 3 confirmed this: **1.90× speedup with better perplexity (5.34 vs 5.39)**. CORTEX extends this with predictive coding (skip predictable computation within each layer), concept-space prediction, and dual-speed memory.
 
 ---
 
@@ -114,11 +134,12 @@ Why this matters:
 | File | Description |
 |---|---|
 | `v7/experiment_adaptive_depth.py` | Adaptive-depth RWKV experiment (3 models: fixed 6L, fixed 2L, adaptive) |
+| `v7/experiment4_predictive_coding.py` | CORTEX Exp 4: predictive coding layer (skip channel-mix when predictable) |
 | `v7/experiment1_results.md` | Exp 1: gate collapse, 0.1% early exit |
 | `v7/experiment2_results.md` | Exp 2: entropy-based exit, 2.72× speedup, all tokens exit at layer 2 |
 | `v7/experiment3_results.md` | Exp 3: **1.90× speedup, better PPL, token-level discrimination** |
-| `v7/ARCHITECTURE.md` | KUNLUN adaptive-depth architecture proposal |
-| `v7/PROJECT_PLAN.md` | Two-track plan: POC experiments → full KUNLUN |
+| `v7/ARCHITECTURE.md` | CORTEX brain-inspired architecture design |
+| `v7/PROJECT_PLAN.md` | Experiment roadmap: individual validation → integration |
 | `train.py` | v6 SUPERNOVA training |
 | `train_v52.py` | v5.2 Nova-Ignition training script |
 | `trainv4.py` | v4 Bolt (archived) |

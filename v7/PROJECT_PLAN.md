@@ -1,4 +1,4 @@
-# KUNLUN Project Plan
+# CORTEX Project Plan
 
 ## Two Tracks: Proof Now, Architecture Later
 

@@ -1,7 +1,7 @@
-# KUNLUN
-## A Superhuman Architecture: Fusing Every Brain Strength with Every AI Advantage
+# CORTEX
+## A Brain-Inspired Architecture: Predictive Coding Meets CPU-Native Computation
 
-**Date**: 2026-03-27
+**Date**: 2026-03-27 (updated 2026-03-28)
 **Target**: CPU-only, 2-4 cores, 5-32GB RAM, 2 hours training
 **Goal**: Fluent language model that proves I ≈ P × D × C is a Transformer observation, not a law.
 
