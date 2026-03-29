@@ -12,12 +12,12 @@
 
 This is ONE falsifiable claim. Not a grand vision. A number.
 
-## Why This Proof Matters for KUNLUN
+## Why This Proof Matters for CORTEX
 
 If this works, we've proven the foundational principle:
 > CPU-native conditional computation is not just "different" — it's faster.
 
-Everything else in KUNLUN (predictive coding, dual memory, semantic concepts) builds on this being true.
+Everything else in CORTEX (predictive coding, dual memory, semantic concepts) builds on this being true.
 
 ## The Experiment
 
@@ -155,7 +155,7 @@ FAILURE:
 
 ---
 
-# Track 2: The Path to Full KUNLUN (FUTURE)
+# Track 2: The Path to Full CORTEX (FUTURE)
 
 ## Building Blocks (Each Is Its Own Paper/Experiment)
 
@@ -190,7 +190,7 @@ FAILURE:
 - Metric: Task A performance after learning Task B
 
 ### Block 6: Integration (Week 10+)
-- Combine all proven blocks into KUNLUN
+- Combine all proven blocks into CORTEX
 - End-to-end training
 - Full evaluation suite
 - Paper
@@ -211,10 +211,10 @@ FAILURE:
 
 ```
 Instead of claiming:
-  "KUNLUN breaks scaling laws and creates superhuman intelligence"
+  "CORTEX breaks scaling laws and creates superhuman intelligence"
 
 We honestly claim:
-  "KUNLUN is a CPU-native architecture that improves the efficiency
+  "CORTEX is a CPU-native architecture that improves the efficiency
    constant of language modeling by leveraging conditional computation,
    predictive coding, and learned sparse representations. Each component
    is individually validated before integration."

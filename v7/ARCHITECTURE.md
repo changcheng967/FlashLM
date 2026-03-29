@@ -230,12 +230,12 @@ SUPERHUMAN = All brain strengths + All AI advantages + CPU-native operations
 
 ---
 
-# Part III: The KUNLUN Architecture
+# Part III: The CORTEX Architecture
 
 ## 3.1 Design Principles
 
 ```
-KUNLUN's Seven Principles:
+CORTEX's Seven Principles:
 
 1. Predictive First       → Only process surprises → CPU branch prediction advantage
 2. Dual-Speed Learning    → Hippocampus (fast) + Neocortex (slow) → No catastrophic forgetting
@@ -364,7 +364,7 @@ Input: "The cat sat on the mat"
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 3.3 Why KUNLUN Breaks I ≈ P × D × C
+## 3.3 Why CORTEX Breaks I ≈ P × D × C
 
 ```
 Traditional Transformer:
@@ -376,7 +376,7 @@ Traditional Transformer:
   - World knowledge (needs billions of tokens)
   - Logical reasoning (needs billions of tokens)
 
-KUNLUN Architecture:
+CORTEX Architecture:
   I ≈ S × P_eff × D_eff × C_eff
 
   S (Structure):    Built-in structural priors (grammar rules, semantic
@@ -413,7 +413,7 @@ Transformer must learn:
   - Semantic relationships                    → needs massive data
   - Total requirement: ~100M+ params, ~1B+ tokens
 
-KUNLUN must learn:
+CORTEX must learn:
   - Relationships between 65 semantic primes  → very few parameters
   - Grammar: already built-in                 → 0 params, 0 data
   - Semantics: prime composition generates them → very few parameters
@@ -424,7 +424,7 @@ Efficiency gain: ~50-200x
 
 ## 3.4 Superhuman Brain vs Human Brain vs Transformer
 
-| Dimension | Human Brain | Transformer | KUNLUN (Superhuman) |
+| Dimension | Human Brain | Transformer | CORTEX (Superhuman) |
 |-----------|-------------|-------------|---------------------|
 | **Basic unit** | Neural spikes | Tokens | Semantic primes |
 | **Processing** | Predictive coding | Full computation | Predictive coding (skip 90%) |
@@ -440,7 +440,7 @@ Efficiency gain: ~50-200x
 | **Fatigue** | 8 hours | None | **None** |
 | **Attention** | Serial bottleneck | Parallel but O(n²) | **Parallel + O(1) hash** |
 
-**KUNLUN = Brain's algorithms + AI's hardware advantages + CPU's architectural advantages**
+**CORTEX = Brain's algorithms + AI's hardware advantages + CPU's architectural advantages**
 
 ## 3.5 Training Pipeline
 
@@ -473,7 +473,7 @@ Total: ~2 hours
 ```
 Input: "Once upon a time, there was a little girl who"
 
-KUNLUN output:
+CORTEX output:
 "Once upon a time, there was a little girl who lived in a
 small house near the forest. Every morning she would walk
 to the market to buy fresh bread. One day, she met a kind
@@ -491,7 +491,7 @@ Characteristics:
 ```
 Paper title candidates:
 
-1. "KUNLUN: The First Superhuman Language Architecture
+1. "CORTEX: The First Superhuman Language Architecture
      Designed for Sequential Processors"
 
 2. "Predictive Coding + Semantic Primes: Breaking Transformer

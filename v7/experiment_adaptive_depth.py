@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KUNLUN POC Experiment 3: Discriminative Adaptive Depth
+CORTEX POC Experiment 3: Discriminative Adaptive Depth
 ======================================================
 Goal: Get the model to discriminate easy vs hard tokens,
 so exit distribution spreads across layers 2, 4, 6 instead of
@@ -726,7 +726,7 @@ def main():
     torch.set_num_threads(4)
 
     print("=" * 60)
-    print("KUNLUN Experiment 3: Discriminative Adaptive Depth")
+    print("CORTEX Experiment 3: Discriminative Adaptive Depth")
     print("=" * 60)
     print(f"Device: {device}")
     print(f"CPU threads: {torch.get_num_threads()}")

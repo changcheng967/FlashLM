@@ -1,9 +1,9 @@
-# KUNLUN POC Experiment 3 Results
+# CORTEX POC Experiment 3 Results
 
 **Date**: 2026-03-28
 **Machine**: Lightning AI (4 CPU cores, CPU-only)
 **Runtime**: ~105 minutes total (45 min fixed-6L + 14 min fixed-2L + 44 min adaptive + benchmarks)
-**Script**: `kunlun_poc.py` (progressive thresholds, diversity loss, 2-layer baseline, per-exit perplexity)
+**Script**: `experiment_adaptive_depth.py` (progressive thresholds, diversity loss, 2-layer baseline, per-exit perplexity)
 
 ---
 

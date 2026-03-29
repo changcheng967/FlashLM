@@ -1,9 +1,9 @@
-# KUNLUN POC Experiment 1 Results
+# CORTEX POC Experiment 1 Results
 
 **Date**: 2026-03-27
 **Machine**: Lightning AI (4 CPU cores, CPU-only)
 **Runtime**: ~101 minutes total (52 min fixed + 49 min adaptive)
-**Script**: `kunlun_poc.py` (original, before exit gate fixes)
+**Script**: `experiment_adaptive_depth.py` (original, before exit gate fixes)
 
 ---
 
@@ -119,7 +119,7 @@ They fan!" The an sailyed, ces ter s sarm Thiche f"
   3. Fixed threshold of 0.5 was too high for an uncalibrated gate
 
 ### Next Steps (Experiment 2)
-Three fixes applied to `kunlun_poc.py`:
+Three fixes applied to `experiment_adaptive_depth.py`:
 1. **Entropy-based exit** at inference — replaces learned gate with `1 - H/H_max` of prediction distribution
 2. **Consistency loss** during training — supervises gate to predict agreement between exit and final predictions
 3. **Threshold sweep** — maps full throughput vs exit-rate tradeoff curve (10 thresholds from 0.05 to 0.70)
