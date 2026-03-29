@@ -48,7 +48,7 @@ An adaptive-depth model where easy tokens (common words, punctuation) exit at la
 | # | Principle | Status |
 |---|-----------|--------|
 | 4 | Predictive coding (skip predictable channel-mix) | **Done — 13.3% skip, 0.93x speedup (negative result)** |
-| 5 | Learned sparse representations | Planned |
+| 5 | Learned sparse representations | **Running** — sparsity sweep on Lightning AI |
 | 6 | Concept-space prediction (percepts, not tokens) | Planned |
 | 7 | Hash-based fast memory | Planned |
 | 8 | Dual-speed learning | Planned |
@@ -72,7 +72,7 @@ See `v7/experiment1_results.md`, `v7/experiment2_results.md`, and `v7/experiment
 
 | Model | Architecture | Params | Hardware | Train Time | Data | PPL | BPC | Status |
 |---|---|---|---|---|---|---|---|---|
-| **v7 CORTEX** | RWKV + predictive coding (adaptive depth) | 4.1M | 4 CPU cores | 44min | TinyStories 19M tok | **5.34** | — | **Exp 3-4 done** |
+| **v7 CORTEX** | RWKV + predictive coding (adaptive depth) | 4.1M | 4 CPU cores | 44min | TinyStories 19M tok | **5.34** | — | **Exp 3-4 done, Exp 5 running** |
 | **v6 "SUPERNOVA"** | Linear mixer + GLU | 4.1M | 2 vCPU / 5 GB | 3h | 4.4M tokens | 14.0 | — | Data-limited |
 | **v5 "Thunderbolt"** | ParallelGatedRecurrence | 29.7M | Ryzen 7950X3D | 40h | Full TinyStories | **1.36** | **0.44** | Complete |
 | **v5.2 "Nova-Ignition"** | Transformer (RoPE + Attention) | 5.0M | 2 vCPU / 5 GB | 2h | 20M tokens | 10.56 | 0.78 | Complete |

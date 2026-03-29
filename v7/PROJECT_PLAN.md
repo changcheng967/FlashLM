@@ -52,7 +52,7 @@ Each experiment proves ONE principle. No combining until each is individually va
 
 ---
 
-### Block 3: Learned Sparse Representations (Planned — Experiment 5)
+### Block 3: Learned Sparse Representations — RUNNING (Experiment 5)
 
 **Hypothesis:** A learned sparse bottleneck (not fixed primes) forces efficient representations, improving per-parameter quality.
 
@@ -155,7 +155,7 @@ Train end-to-end on TinyStories. Compare against Transformer baseline on same da
 |-------|-----------|--------|
 | 1 | Adaptive depth | **Done** — 1.90× speedup, better PPL |
 | 2 | Predictive coding | **Done** — 13.3% skip, 0.93x speedup (negative result) |
-| 3 | Sparse representations | Planned |
+| 3 | Sparse representations | **Running** — Exp 5 sparsity sweep |
 | 4 | Concept-space prediction | Planned |
 | 5 | Hash-based memory | Planned |
 | 6 | Dual-speed learning | Planned |
