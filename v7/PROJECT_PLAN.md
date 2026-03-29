@@ -1,237 +1,145 @@
 # CORTEX Project Plan
 
-## Two Tracks: Proof Now, Architecture Later
+## FlashLM v7: Brain-Inspired Language Model on CPU
+
+**Architecture**: CORTEX (predictive coding, sparse representations, dual memory)
+**Model**: FlashLM v7 (trained on CORTEX architecture)
+**Target**: CPU-only, 4 cores, ~2 hours training
+**Unit**: percept (1 percept = 1 meaningful concept unit; char-level: 1 percept ≈ 1 token)
 
 ---
 
-# Track 1: The Single Proof (NOW — 2 Hours on Lightning AI)
+## Experiment Roadmap
 
-## What We're Proving
+Each experiment proves ONE principle. No combining until each is individually validated.
 
-**Hypothesis:** "A language model with adaptive compute depth processes more tokens per second on CPU than a fixed-depth model of equivalent quality, because conditional early-exit maps to CPU branch prediction while causing GPU thread divergence."
+### Block 1: Adaptive Depth — DONE
 
-This is ONE falsifiable claim. Not a grand vision. A number.
+**Proved:** Conditional computation is faster on CPU than fixed-depth at matched quality.
 
-## Why This Proof Matters for CORTEX
+| # | Approach | Result | Status |
+|---|----------|--------|--------|
+| 1 | Learned MLP gate + fixed threshold | Gate collapse: 0.1% early exit, 0.96× speedup | Done |
+| 2 | Entropy-based exit + consistency loss | 2.72× speedup, all tokens exit at layer 2 | Done |
+| 3 | Progressive thresholds + diversity loss | **1.90× speedup, PPL 5.34 < 5.39, token discrimination** | Done |
 
-If this works, we've proven the foundational principle:
-> CPU-native conditional computation is not just "different" — it's faster.
-
-Everything else in CORTEX (predictive coding, dual memory, semantic concepts) builds on this being true.
-
-## The Experiment
-
-### Architecture: Adaptive-Depth RWKV
-
-```
-Standard RWKV:       token → [Layer1 → Layer2 → Layer3 → Layer4 → Layer5 → Layer6] → output
-                     Every token goes through all 6 layers.
-
-Adaptive-Depth RWKV:  token → [Layer1 → Layer2] → confidence_check
-                           ├── if confident: EXIT → output          (fast path, ~60% tokens)
-                           └── if not:     → [Layer3 → Layer4] → confidence_check
-                                              ├── if confident: EXIT → output   (medium path, ~30%)
-                                              └── if not:     → [Layer5 → Layer6] → output (deep, ~10%)
-```
-
-### What We Measure
-
-```
-Metric 1: Effective throughput (tokens/sec) at matched perplexity
-  - Train fixed-depth RWKV-6L for 90 min → measure perplexity + throughput
-  - Train adaptive-depth RWKV-6L for 90 min → measure perplexity + throughput
-  - Compare: does adaptive get higher throughput at same quality?
-
-Metric 2: Compute distribution
-  - What % of tokens exit at depth 2?
-  - What % at depth 4?
-  - What % go full depth?
-
-Metric 3: Per-layer accuracy
-  - At each exit point, how good is the prediction?
-  - Shows whether the confidence gate is well-calibrated
-```
-
-### Model Config
-
-```
-Shared config:
-  d_model:       256
-  d_ff:          512
-  vocab_size:    8192 (trained BPE)
-  seq_len:       256
-  data:          TinyStories
-
-Fixed-depth baseline:
-  Layers:        6
-  Total params:  ~4M
-
-Adaptive-depth:
-  Layers:        6 (same)
-  Exit points:   at layer 2, layer 4, layer 6
-  Router:        2-layer MLP at each exit point
-  Total params:  ~4.2M (+ 0.2M for routers)
-```
-
-### Training Protocol
-
-```
-Step 1 (10 min):  Environment setup
-  - SSH into Lightning AI
-  - pip install torch numpy
-  - Create project structure
-
-Step 2 (15 min):  Data preparation
-  - Download TinyStories
-  - Train BPE tokenizer (vocab=8192)
-  - Tokenize and save as memory-mapped binary
-
-Step 3 (10 min):  Implement RWKV block
-  - Time-mixing (linear attention, O(1) state)
-  - Channel-mixing (gated FFN)
-  - Standard, proven component
-
-Step 4 (10 min):  Implement confidence gate
-  - At each exit point: LayerNorm → Linear → sigmoid
-  - During training: use Gumbel-Softmax for differentiability
-  - During inference: hard threshold
-
-Step 5 (40 min):  Train fixed-depth baseline
-  - 6-layer RWKV, standard training loop
-  - Log loss every 100 steps
-  - Save checkpoint
-
-Step 6 (40 min):  Train adaptive-depth model
-  - Same architecture + confidence gates
-  - Loss = weighted sum across exit points
-  - Log: loss, exit distribution, throughput
-  - Save checkpoint
-
-Step 7 (15 min):  Evaluate and compare
-  - Generate samples from both models
-  - Measure throughput (tokens/sec)
-  - Measure perplexity on held-out set
-  - Record exit distribution
-
-Total: ~2 hours
-```
-
-### What Success Looks Like
-
-```
-BEST CASE:
-  - Adaptive model: 15,000 tokens/sec, perplexity 8.0
-  - Fixed model:    8,000 tokens/sec,  perplexity 8.0
-  → Adaptive is 1.9x faster at same quality
-  → Publishable result: "Adaptive compute depth doubles CPU inference throughput"
-
-GOOD CASE:
-  - Adaptive model: 12,000 tokens/sec, perplexity 9.0
-  - Fixed model:     8,000 tokens/sec, perplexity 8.0
-  → Adaptive is 1.5x faster, slightly worse quality
-  → Still interesting: the speed-quality tradeoff favors adaptive on CPU
-
-MINIMUM VIABLE:
-  - Adaptive model works, generates coherent text
-  - Exit distribution shows meaningful variance (not all tokens at same depth)
-  - Throughput advantage exists even if small
-  → Proof of concept, worth continuing
-
-FAILURE:
-  - Router collapses (all tokens go to same depth)
-  - Quality much worse than baseline
-  - No throughput advantage
-  → Need to rethink gating mechanism
-```
-
-### Why This Specific Experiment
-
-1. **RWKV is proven** — we're not inventing the base architecture, just adding adaptive depth
-2. **BPE tokenizer is standard** — no semantic prime debates
-3. **TinyStories is well-studied** — results are interpretable
-4. **The measurement is unambiguous** — tokens/sec and perplexity are numbers, not opinions
-5. **It isolates ONE variable** — adaptive depth is the only difference between the two models
-6. **It's doable in 2 hours** — proven components, small model, fast dataset
+**Key result:** 56.8% tokens exit at layer 2, 43.2% at layer 4. Better PPL than fixed-depth.
 
 ---
 
-# Track 2: The Path to Full CORTEX (FUTURE)
+### Block 2: Predictive Coding Layer — RUNNING (Experiment 4)
 
-## Building Blocks (Each Is Its Own Paper/Experiment)
+**Hypothesis:** A RWKV block where the channel-mix (FFN) can be skipped for predictable positions will infer faster with maintained quality.
 
-### Block 1: Adaptive Depth (NOW — Track 1)
-- Prove: conditional computation is faster on CPU
-- Status: **Implementing now**
+**Design:**
+```
+Standard Block:    x → TimeMix → ChannelMix → output  (always full)
+CORTEX Block:      x → TimeMix → Predictor(cheap) → if confident: prediction
+                                                           else: ChannelMix → output
+```
 
-### Block 2: Predictive Coding Layer (Week 2-3)
-- Hypothesis: "A layer that only processes prediction errors trains faster than a standard layer"
-- Experiment: Replace one RWKV layer with a predictive coding layer
-- Metric: Same perplexity in fewer training steps
-- Challenge: predict() cost must be less than full-layer cost
-- Differentiability: prediction errors are naturally differentiable (no discrete ops)
+- Time-mix ALWAYS runs (maintains recurrent state)
+- Channel-mix CONDITIONAL (only for "surprises")
+- Learned predictor: linear approximation of channel-mix output
+- Learned confidence head: predicts when predictor is accurate enough to skip
 
-### Block 3: Learned Sparse Representations (Week 4-5)
-- NOT fixed 65 primes — let the model learn its own sparse code
-- Hypothesis: "A bottleneck that forces sparse activations learns more efficiently"
-- Experiment: Add a sparse autoencoder bottleneck between layers
-- Metric: Information preserved per active dimension
-- Key insight from review: the number of primes must be learned, not prescribed
+**Status:** Running on Lightning AI. Script: `v7/experiment4_predictive_coding.py`
 
-### Block 4: Hash-Based Memory with Soft Attention (Week 6-7)
-- Hypothesis: "Soft hash-based retrieval achieves O(1)-ish lookups with acceptable quality"
-- Experiment: Replace attention with learned-hash slots + soft read/write
-- Challenge: Must be differentiable (use soft assignment, not hard hash)
-- Metric: Perplexity vs. FLOPs compared to standard attention
+---
 
-### Block 5: Dual-Speed Weight Updates (Week 8-9)
-- Hypothesis: "Two learning rates (fast + slow) reduce catastrophic forgetting"
-- Experiment: Split weight matrix into fast-updating and slow-updating portions
-- Train on Task A, then Task B, measure Task A retention
-- Metric: Task A performance after learning Task B
+### Block 3: Learned Sparse Representations (Planned — Experiment 5)
 
-### Block 6: Integration (Week 10+)
-- Combine all proven blocks into CORTEX
-- End-to-end training
-- Full evaluation suite
-- Paper
+**Hypothesis:** Forcing sparse activations (85% zeros) makes the model learn more per parameter.
 
-## How Each Block Addresses the Review's Critiques
+- Add bottleneck between layers that zeros out ~85% of dimensions
+- Only 15% carry information — like the brain's 2-5% activation rate
+- Measure: PPL at matched params, active dims per percept, information per active dim
 
-| Critique | How We Address It |
-|----------|------------------|
-| "predict() isn't free" | Block 2: measure predict() cost explicitly, only deploy if net savings |
-| "65 primes insufficient" | Block 3: learned sparse code, not fixed — let model decide dimensionality |
-| "Hash not differentiable" | Block 4: soft assignment (continuous relaxation), not hard hash |
-| "Dual memory not new" | Block 5: acknowledge prior work, test specific CPU-native implementation |
-| "Scaling laws can't break" | We don't claim to break them — we aim to improve the coefficient |
-| "No backprop through skips" | Block 1: Gumbel-Softmax for training, hard threshold at inference |
-| "Bootstrapping limit" | Future: semantic encoder quality = ceiling — measure this explicitly |
+---
 
-## The Long-Term Vision (Honest Version)
+### Block 4: Concept-Space Prediction (Planned — Experiment 6)
+
+**Hypothesis:** Predicting meanings is more data-efficient than predicting tokens.
+
+- Train lightweight encoder: text → concept vectors (~200 dims)
+- Core model predicts in concept space, not 32K-token softmax
+- Decoder maps concepts back to text
+- Measure: percepts to competence, generalization on unseen word combinations
+
+---
+
+### Block 5: Hash-Based Fast Memory (Planned — Experiment 7)
+
+**Hypothesis:** O(1) hash lookup for known patterns speeds up inference.
+
+- Hash table alongside weight matrices
+- Common patterns cached in hash, new inputs check hash first
+- Fall back to matrix compute only on cache miss
+- Measure: cache hit rate, percept/s, quality impact
+
+---
+
+### Block 6: Dual-Speed Learning (Planned — Experiment 8)
+
+**Hypothesis:** Fast + slow learning rates resist catastrophic forgetting.
+
+- Fast weights: high LR, hash table, learn instantly, decay quickly
+- Slow weights: low LR, matrix, learn gradually, persist permanently
+- Periodic "replay" consolidates fast → slow (like sleep)
+- Measure: Task A retention after learning Task B
+
+---
+
+### Block 7: Built-In Grammar / Surface Realizer (Planned — Experiment 9)
+
+**Hypothesis:** Grammar doesn't need to be learned from data.
+
+- Concept → text decoder with hardcoded grammar templates
+- Model predicts WHAT to say (concept sequence)
+- Realizer handles HOW to say it (grammar rules)
+- Measure: grammar accuracy from step 1, training data needed
+
+---
+
+### Integration → FlashLM v7 (Experiment 10)
+
+Combine all proven blocks:
 
 ```
-Instead of claiming:
-  "CORTEX breaks scaling laws and creates superhuman intelligence"
+Input text
+  → Percept Encoder (from Exp 6)
+  → Predictive Coder (from Exp 4) — skip predictable stuff
+  → Sparse Concept Bottleneck (from Exp 5) — only keep what matters
+  → Hash + Matrix Dual Memory (from Exp 7+8) — fast lookup + slow learning
+  → Concept Predictor — predict next meaning
+  → Surface Realizer (from Exp 9) — concept → text with built-in grammar
+  → Output text
+```
 
-We honestly claim:
-  "CORTEX is a CPU-native architecture that improves the efficiency
-   constant of language modeling by leveraging conditional computation,
-   predictive coding, and learned sparse representations. Each component
-   is individually validated before integration."
+Train end-to-end on TinyStories. Compare against Transformer baseline on same data/time budget.
+
+---
+
+## Progress Summary
+
+| Block | Principle | Status |
+|-------|-----------|--------|
+| 1 | Adaptive depth | **Done** — 1.90× speedup, better PPL |
+| 2 | Predictive coding | **Running** — Exp 4 on Lightning AI |
+| 3 | Sparse representations | Planned |
+| 4 | Concept-space prediction | Planned |
+| 5 | Hash-based memory | Planned |
+| 6 | Dual-speed learning | Planned |
+| 7 | Built-in grammar | Planned |
+| Integration | FlashLM v7 | After all blocks validated |
+
+## The Vision (Honest Version)
+
+```
+"CORTEX is a CPU-native architecture that improves the efficiency
+ of language modeling by leveraging conditional computation,
+ predictive coding, and learned sparse representations.
+ Each component is individually validated before integration."
+```
 
 The grand vision stays. But it's built on verified components, not wishful thinking.
-```
-
----
-
-# Decision Point
-
-**Now**: We execute Track 1 on the Lightning AI machine.
-  - Install dependencies
-  - Build RWKV + adaptive depth
-  - Train both models
-  - Measure and report results
-
-**After results**: We decide whether to continue to Track 2 based on data, not hope.
-
-Ready to start? Or do you want to adjust the experiment design?
