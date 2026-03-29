@@ -47,7 +47,7 @@ An adaptive-depth model where easy tokens (common words, punctuation) exit at la
 
 | # | Principle | Status |
 |---|-----------|--------|
-| 4 | Predictive coding (skip predictable channel-mix) | **Script ready** |
+| 4 | Predictive coding (skip predictable channel-mix) | **Running** |
 | 5 | Learned sparse representations | Planned |
 | 6 | Concept-space prediction (percepts, not tokens) | Planned |
 | 7 | Hash-based fast memory | Planned |
@@ -71,7 +71,7 @@ See `v7/experiment1_results.md`, `v7/experiment2_results.md`, and `v7/experiment
 
 | Model | Architecture | Params | Hardware | Train Time | Data | PPL | BPC | Status |
 |---|---|---|---|---|---|---|---|---|
-| **v7 CORTEX** | RWKV + predictive coding (adaptive depth) | 4.1M | 4 CPU cores | 44min | TinyStories 19M tok | **5.34** | — | **Exp 3 done, Exp 4 ready** |
+| **v7 CORTEX** | RWKV + predictive coding (adaptive depth) | 4.1M | 4 CPU cores | 44min | TinyStories 19M tok | **5.34** | — | **Exp 3 done, Exp 4 running** |
 | **v6 "SUPERNOVA"** | Linear mixer + GLU | 4.1M | 2 vCPU / 5 GB | 3h | 4.4M tokens | 14.0 | — | Data-limited |
 | **v5 "Thunderbolt"** | ParallelGatedRecurrence | 29.7M | Ryzen 7950X3D | 40h | Full TinyStories | **1.36** | **0.44** | Complete |
 | **v5.2 "Nova-Ignition"** | Transformer (RoPE + Attention) | 5.0M | 2 vCPU / 5 GB | 2h | 20M tokens | 10.56 | 0.78 | Complete |
