@@ -29,7 +29,7 @@ Each experiment proves ONE principle. No combining until each is individually va
 
 ### Block 2: Predictive Coding Layer — RUNNING (Experiment 4)
 
-**Hypothesis:** A RWKV block where the channel-mix (FFN) can be skipped for predictable positions will infer faster with maintained quality.
+**Hypothesis:** Confidence-gated computation can skip 30-60% of channel-mix operations at inference with <5% PPL degradation.
 
 **Design:**
 ```
@@ -43,39 +43,71 @@ CORTEX Block:      x → TimeMix → Predictor(cheap) → if confident: predicti
 - Learned predictor: linear approximation of channel-mix output
 - Learned confidence head: predicts when predictor is accurate enough to skip
 
+**Validation Metrics:**
+- Skip ratio: % of channel-mix ops skipped (target: 30-60%)
+- Skip accuracy: % of skipped positions with acceptable error (target: >90%)
+- PPL with skipping vs without (target: <5% degradation)
+- Percept/s inference speedup (target: >1.3x)
+
+**Failure Condition:** If skip_accuracy <80% after convergence, the confidence signal is not learnable — would need architectural change (e.g., auxiliary loss directly supervising confidence = prediction error).
+
 **Status:** Running on Lightning AI. Script: `v7/experiment4_predictive_coding.py`
 
 ---
 
 ### Block 3: Learned Sparse Representations (Planned — Experiment 5)
 
-**Hypothesis:** Forcing sparse activations (85% zeros) makes the model learn more per parameter.
+**Hypothesis:** A learned sparse bottleneck (not fixed primes) forces efficient representations, improving per-parameter quality.
 
-- Add bottleneck between layers that zeros out ~85% of dimensions
-- Only 15% carry information — like the brain's 2-5% activation rate
-- Measure: PPL at matched params, active dims per percept, information per active dim
+- Top-k activation: only top 15% of dimensions carry signal, rest zeroed
+- Dimensions are LEARNED (data-driven), not prescribed
+- Like the brain's 2-5% activation rate, but discovered by the model
+
+**Validation Metrics:**
+- PPL at matched parameter count vs dense baseline
+- Active dimensions per percept (target: ≤15%)
+- Information preserved per active dimension
+
+**Failure Condition:** If PPL degrades >15% at 15% sparsity, sparse bottleneck is too aggressive — try 25-30%.
 
 ---
 
 ### Block 4: Concept-Space Prediction (Planned — Experiment 6)
 
-**Hypothesis:** Predicting meanings is more data-efficient than predicting tokens.
+**Hypothesis:** A learned concept bottleneck between embedding and prediction is more data-efficient than direct token prediction.
 
-- Train lightweight encoder: text → concept vectors (~200 dims)
-- Core model predicts in concept space, not 32K-token softmax
-- Decoder maps concepts back to text
-- Measure: percepts to competence, generalization on unseen word combinations
+**Key insight:** Don't predict fixed semantic primes. Learn a concept space with top-k sparsity. The concept encoder and decoder are trained jointly with the predictor.
+
+- Encoder: tokens → sparse concept vectors (learned, ~200 dims, 15% active)
+- Predictor: predict next concept vector in learned space
+- Decoder: concept vector → tokens (jointly trained)
+- Not frozen GPT-2. Trained from scratch.
+
+**Validation Metrics:**
+- Percepts to target PPL (vs baseline tokens-to-target)
+- Generalization: can model handle unseen word combinations?
+
+**Failure Condition:** If concept-space PPL is consistently worse than token-space at same compute budget, concept bottleneck adds overhead without benefit.
 
 ---
 
-### Block 5: Hash-Based Fast Memory (Planned — Experiment 7)
+### Block 5: Soft Hash Memory (Planned — Experiment 7)
 
-**Hypothesis:** O(1) hash lookup for known patterns speeds up inference.
+**Hypothesis:** Locality-sensitive hashing with learned projections enables approximate O(1)-ish retrieval for known patterns.
 
-- Hash table alongside weight matrices
-- Common patterns cached in hash, new inputs check hash first
-- Fall back to matrix compute only on cache miss
-- Measure: cache hit rate, percept/s, quality impact
+**Key insight:** Exact hash lookup fails for language (similar contexts hash differently). Use multiple hash tables with learned projections for soft matching.
+
+- Multiple random projection tables (4-8)
+- Learned projections (not random) for better bucket alignment
+- Aggregate results across tables (soft matching)
+- Fallback to full compute on cache miss
+
+**Validation Metrics:**
+- Cache hit rate across tables (target: >60%)
+- Retrieval recall: % of semantically similar contexts retrieved
+- Percept/s with vs without hash memory
+
+**Failure Condition:** If retrieval recall <30%, soft hashing can't find similar contexts — abandon hash approach entirely.
 
 ---
 

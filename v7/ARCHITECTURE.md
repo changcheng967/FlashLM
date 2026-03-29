@@ -2,8 +2,11 @@
 ## A Brain-Inspired Architecture: Predictive Coding Meets CPU-Native Computation
 
 **Date**: 2026-03-27 (updated 2026-03-28)
-**Target**: CPU-only, 2-4 cores, 5-32GB RAM, 2 hours training
+**Status**: Vision Document — Aspirational Design. See PROJECT_PLAN.md for actual experiments.
+**Target**: CPU-only, 2-4 cores, 5-32GB RAM. 2 hours training
 **Goal**: Fluent language model that proves I ≈ P × D × C is a Transformer observation, not a law.
+
+> **Note:** This document describes the full vision for CORTEX. Individual components are validated experimentally before integration. The neuroscience foundations (Part I-II) are solid. The engineering proposals (Part III-IV) contain hypotheses that must survive falsification — several have been revised based on critical review. See "Revisions" section at the end.
 
 ---
 
@@ -545,3 +548,61 @@ Week 4: Surface realizer + end-to-end training + evaluation
   We don't need to wait 500 million more years — we can fuse the
   brain's algorithms with AI's hardware advantages to create an
   architecture superior to both."*
+
+---
+
+# Part V: Revisions from Critical Review
+
+The following revisions were made after external critical review identified issues in the original proposal.
+
+## What Stands
+
+- **Neuroscience foundations (Parts I-II)**: Predictive coding, dual memory. sparse representations — well-researched and accurate
+- **CPU branching advantage**: Architecturally correct. Exp 1-3 confirmed with real data
+- **Predictive coding as inference optimization**: Valid. Exp 4 tests this directly
+- **Dual-speed learning**: Strong theoretical foundation from complementary learning systems
+
+## What Was Revised
+
+### Semantic Primes (Section 3.2)
+
+**Original claim:** 65 fixed semantic primes create a "500x smaller prediction space."
+**Problem:** Predicting 65 continuous values has *more* joint distribution complexity than predicting 1 of 32K discrete tokens. The contextual dependencies (which make LM hard) don't vanish — they move into the encoder.
+**Revision:** Concept space must be **learned, not prescribed**. Use a sparse bottleneck layer that discovers its own dimensions. Top-k activation for sparsity. Validate: does a learned sparse representation achieve similar PPL with fewer active dimensions?
+
+### Hash-Based Memory (Section 3.2)
+
+**Original claim:** Hash table → O(1) lookup → beats attention.
+**Problem:** Hash tables require exact key matches. Language needs soft matching (semantically similar ≠ identical). "The cat sat on the mat" and "A kitten rested on the rug" hash to different buckets.
+**Revision:** Use locality-sensitive hashing (LSH) with learned projections for approximate matching. Multiple hash tables. Aggregate soft matches. Or: abandon hash memory entirely and focus on sparse attention patterns.
+
+### Surface Realizer (Section 3.2)
+
+**Original claim:** Grammar is built-in via templates → 0 params for grammar.
+**Problem:** Template-based NLG was the dominant paradigm in 1990s-2000s. Abandoned because it produces stilted text. To generate fluent text, the realizer would need to be a capable LM in its own right.
+**Revision:** Two options:
+  1. **Constrained decoding**: Grammar as soft constraint (re-ranking beams by syntactic score). Not templates.
+  2. **Abandon explicit grammar entirely**: Let grammaticality emerge from data-driven training (viable at ≥1M tokens).
+
+### Frozen GPT-2 Encoder
+
+**Original proposal:** Use frozen GPT-2 as semantic encoder.
+**Problem:** This means CORTEX's "brain-inspired" language understanding is entirely parasitic on a Transformer. The scaling law argument becomes circular (hide 124M params inside GPT-2, claim "only 2.8M params").
+**Resolution:** Our actual experiments train everything from scratch. No frozen encoders. This was a vision doc shortcut, not our implementation approach.
+
+## What We're Actually Doing
+
+The vision stays. The implementation is grounded:
+
+```
+1. Small model (2-5M trainable params)
+2. Trained from scratch (no frozen GPT-2 crutch)
+3. Sparse representations (learned, not prescribed)
+4. Predictive coding for inference speedup (not training speedup)
+5. Dual-speed learning for continual learning
+6. On CPU, targeting TinyStories
+7. NOT claiming to break scaling laws
+8. Proving: structural priors improve parameter efficiency, measured rigorously
+```
+
+Each component validated individually with real numbers before integration.
