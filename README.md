@@ -47,7 +47,7 @@ An adaptive-depth model where easy tokens (common words, punctuation) exit at la
 
 | # | Principle | Status |
 |---|-----------|--------|
-| 4 | Predictive coding (skip predictable channel-mix) | **Running** |
+| 4 | Predictive coding (skip predictable channel-mix) | **Done — 13.3% skip, 0.93x speedup (negative result)** |
 | 5 | Learned sparse representations | Planned |
 | 6 | Concept-space prediction (percepts, not tokens) | Planned |
 | 7 | Hash-based fast memory | Planned |
@@ -62,6 +62,7 @@ An adaptive-depth model where easy tokens (common words, punctuation) exit at la
 | 1 | Learned MLP gate + fixed threshold | Gate collapse: 0.1% early exit, 0.96× speedup |
 | 2 | Entropy-based exit + consistency loss | **2.72× speedup** but all tokens exit at layer 2 |
 | 3 | Progressive thresholds + diversity loss | **1.90× speedup, better PPL (5.34 vs 5.39), token-level discrimination** |
+| 4 | Predictive coding (skip channel-mix) | 13.3% skip, 0.93x speedup — principle validated, net speedup negative |
 
 See `v7/experiment1_results.md`, `v7/experiment2_results.md`, and `v7/experiment3_results.md` for full details.
 
@@ -71,7 +72,7 @@ See `v7/experiment1_results.md`, `v7/experiment2_results.md`, and `v7/experiment
 
 | Model | Architecture | Params | Hardware | Train Time | Data | PPL | BPC | Status |
 |---|---|---|---|---|---|---|---|---|
-| **v7 CORTEX** | RWKV + predictive coding (adaptive depth) | 4.1M | 4 CPU cores | 44min | TinyStories 19M tok | **5.34** | — | **Exp 3 done, Exp 4 running** |
+| **v7 CORTEX** | RWKV + predictive coding (adaptive depth) | 4.1M | 4 CPU cores | 44min | TinyStories 19M tok | **5.34** | — | **Exp 3-4 done** |
 | **v6 "SUPERNOVA"** | Linear mixer + GLU | 4.1M | 2 vCPU / 5 GB | 3h | 4.4M tokens | 14.0 | — | Data-limited |
 | **v5 "Thunderbolt"** | ParallelGatedRecurrence | 29.7M | Ryzen 7950X3D | 40h | Full TinyStories | **1.36** | **0.44** | Complete |
 | **v5.2 "Nova-Ignition"** | Transformer (RoPE + Attention) | 5.0M | 2 vCPU / 5 GB | 2h | 20M tokens | 10.56 | 0.78 | Complete |
@@ -135,6 +136,7 @@ Why this matters:
 |---|---|
 | `v7/experiment_adaptive_depth.py` | Adaptive-depth RWKV experiment (3 models: fixed 6L, fixed 2L, adaptive) |
 | `v7/experiment4_predictive_coding.py` | CORTEX Exp 4: predictive coding layer (skip channel-mix when predictable) |
+| `v7/experiment4_results.md` | Exp 4: 13.3% skip, 0.93x speedup — principle validated, net speedup negative |
 | `v7/experiment1_results.md` | Exp 1: gate collapse, 0.1% early exit |
 | `v7/experiment2_results.md` | Exp 2: entropy-based exit, 2.72× speedup, all tokens exit at layer 2 |
 | `v7/experiment3_results.md` | Exp 3: **1.90× speedup, better PPL, token-level discrimination** |
