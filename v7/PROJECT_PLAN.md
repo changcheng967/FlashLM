@@ -52,24 +52,27 @@ Each experiment proves ONE principle. No combining until each is individually va
 
 ---
 
-### Block 3: Learned Sparse Representations — RUNNING (Experiment 5)
+### Block 3: Learned Sparse Representations — DONE (Experiment 5, Negative Result)
 
 **Hypothesis:** A learned sparse bottleneck (not fixed primes) forces efficient representations, improving per-parameter quality.
 
-- Top-k activation: only top 15% of dimensions carry signal, rest zeroed
-- Dimensions are LEARNED (data-driven), not prescribed
-- Like the brain's 2-5% activation rate, but discovered by the model
+**Result:** Negative. Top-k masking on dense tensors degrades both quality and speed at every sparsity level, including 100% dense (no masking).
 
-**Validation Metrics:**
-- PPL at matched parameter count vs dense baseline
-- Active dimensions per percept (target: ≤15%)
-- Information preserved per active dimension
+| Metric | Target | Actual |
+|--------|--------|--------|
+| PPL ratio vs baseline | ≤1.05 | ≥1.10 (worse at all levels) |
+| Training speed | ≥0.95x | ~0.90x (slower) |
+| Inference speed | ≥1.0x | Not measured (session expired) |
 
-**Failure Condition:** If PPL degrades >15% at 15% sparsity, sparse bottleneck is too aggressive — try 25-30%.
+**Root cause:** `topk()` + `scatter_()` + mask multiply on dense tensors adds pure computational overhead. Even at 100% density (k=all), these operations still run. The straight-through estimator also introduces gradient noise that degrades quality.
+
+**Verdict:** Top-k masking on dense tensors is a lose-lose at CPU scale. Does not warrant integration.
+
+**Revisit conditions:** Only if using actual sparse tensor ops (custom CPU kernels) + L0/L1 regularization loss + model scale d_ff > 2048.
 
 ---
 
-### Block 4: Concept-Space Prediction (Planned — Experiment 6)
+### Block 4: Concept-Space Prediction — NEXT (Experiment 6)
 
 **Hypothesis:** A learned concept bottleneck between embedding and prediction is more data-efficient than direct token prediction.
 
@@ -155,8 +158,8 @@ Train end-to-end on TinyStories. Compare against Transformer baseline on same da
 |-------|-----------|--------|
 | 1 | Adaptive depth | **Done** — 1.90× speedup, better PPL |
 | 2 | Predictive coding | **Done** — 13.3% skip, 0.93x speedup (negative result) |
-| 3 | Sparse representations | **Running** — Exp 5 sparsity sweep |
-| 4 | Concept-space prediction | Planned |
+| 3 | Sparse representations | **Done** — top-k masking degrades quality + speed (negative result) |
+| 4 | Concept-space prediction | Next — Exp 6 |
 | 5 | Hash-based memory | Planned |
 | 6 | Dual-speed learning | Planned |
 | 7 | Built-in grammar | Planned |
