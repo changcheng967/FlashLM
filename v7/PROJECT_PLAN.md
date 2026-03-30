@@ -72,20 +72,34 @@ Each experiment proves ONE principle. No combining until each is individually va
 
 ---
 
-### Block 4: Concept-Space Prediction — NEXT (Experiment 6)
+### Block 4: Concept-Space Prediction — RUNNING (Experiment 6)
 
 **Hypothesis:** A learned concept bottleneck between embedding and prediction is more data-efficient than direct token prediction.
 
-**Key insight:** Don't predict fixed semantic primes. Learn a concept space with top-k sparsity. The concept encoder and decoder are trained jointly with the predictor.
+**Key insight:** Don't predict fixed semantic primes. Learn a concept space as a dimensionality bottleneck. The concept encoder and decoder are trained jointly with the predictor.
 
-- Encoder: tokens → sparse concept vectors (learned, ~200 dims, 15% active)
-- Predictor: predict next concept vector in learned space
-- Decoder: concept vector → tokens (jointly trained)
-- Not frozen GPT-2. Trained from scratch.
+**Architecture:**
+```
+Standard:   Embed → [6 RWKV blocks] → LN_out → Linear(256→98) → token logits
+Concept:    Embed → [6 RWKV blocks] → LN_out → Encoder(256→concept_dim)
+                                                    ↕
+                                              Predictor(MLP) predicts next concept
+                                                    ↓
+                                              Decoder(concept_dim→98) → token logits
+```
+
+- Encoder: Linear(256 → concept_dim). Compresses hidden states.
+- Predictor: MLP(256→128→ReLU→concept_dim). Auxiliary: predict next concept vector.
+- Decoder: Linear(concept_dim → 98). Reconstructs token logits.
+- No hard masking, no top-k. Dense linear algebra only. Lesson from Exp 5.
+- Sweep: concept_dim in {32, 64, 128}, then full training at best dim.
+
+**Parameter overhead:** ~63K (+1.5% over baseline). Negligible.
 
 **Validation Metrics:**
-- Percepts to target PPL (vs baseline tokens-to-target)
-- Generalization: can model handle unseen word combinations?
+- PPL at matched step count vs baseline 5.39
+- Concept prediction MSE convergence rate
+- Inference speed
 
 **Failure Condition:** If concept-space PPL is consistently worse than token-space at same compute budget, concept bottleneck adds overhead without benefit.
 
@@ -159,7 +173,7 @@ Train end-to-end on TinyStories. Compare against Transformer baseline on same da
 | 1 | Adaptive depth | **Done** — 1.90× speedup, better PPL |
 | 2 | Predictive coding | **Done** — 13.3% skip, 0.93x speedup (negative result) |
 | 3 | Sparse representations | **Done** — top-k masking degrades quality + speed (negative result) |
-| 4 | Concept-space prediction | Next — Exp 6 |
+| 4 | Concept-space prediction | **Running** — Exp 6 concept bottleneck |
 | 5 | Hash-based memory | Planned |
 | 6 | Dual-speed learning | Planned |
 | 7 | Built-in grammar | Planned |
