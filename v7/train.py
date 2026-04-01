@@ -407,9 +407,17 @@ def prepare_data(config):
     tokens = tokens[:max_tokens]
     split = int(len(tokens) * 0.95)
 
+    # Write to /tmp first (s3fs can't handle rapid binary writes), then copy
+    import shutil, tempfile
+    tmp_dir = Path(tempfile.mkdtemp())
+    tmp_train = tmp_dir / 'train.bin'
+    tmp_val = tmp_dir / 'val.bin'
+    np.array(tokens[:split], dtype=np.uint16).tofile(str(tmp_train))
+    np.array(tokens[split:], dtype=np.uint16).tofile(str(tmp_val))
     data_dir.mkdir(parents=True, exist_ok=True)
-    np.array(tokens[:split], dtype=np.uint16).tofile(str(train_bin))
-    np.array(tokens[split:], dtype=np.uint16).tofile(str(val_bin))
+    shutil.copy2(str(tmp_train), str(train_bin))
+    shutil.copy2(str(tmp_val), str(val_bin))
+    shutil.rmtree(str(tmp_dir))
 
     print(f"    Train: {split:,} tokens")
     print(f"    Val:   {len(tokens) - split:,} tokens")
