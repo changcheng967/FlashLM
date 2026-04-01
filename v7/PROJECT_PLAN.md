@@ -72,36 +72,23 @@ Each experiment proves ONE principle. No combining until each is individually va
 
 ---
 
-### Block 4: Concept-Space Prediction — RUNNING (Experiment 6)
+### Block 4: Concept-Space Prediction — DONE (Experiment 6, Negative Result)
 
 **Hypothesis:** A learned concept bottleneck between embedding and prediction is more data-efficient than direct token prediction.
 
-**Key insight:** Don't predict fixed semantic primes. Learn a concept space as a dimensionality bottleneck. The concept encoder and decoder are trained jointly with the predictor.
+**Result:** Negative. Concept bottleneck degrades quality (PPL 10.33 vs 5.39) and is 30x slower at inference (1.9 vs 57.8 percept/s).
 
-**Architecture:**
-```
-Standard:   Embed → [6 RWKV blocks] → LN_out → Linear(256→98) → token logits
-Concept:    Embed → [6 RWKV blocks] → LN_out → Encoder(256→concept_dim)
-                                                    ↕
-                                              Predictor(MLP) predicts next concept
-                                                    ↓
-                                              Decoder(concept_dim→98) → token logits
-```
+| concept_dim | PPL | vs Baseline | Inference |
+|-------------|-----|-------------|-----------|
+| 32 (8x) | 17.31 | 3.2x worse | 1.9 p/s |
+| 64 (4x) | 12.14 | 2.3x worse | 1.9 p/s |
+| 128 (2x) | 10.33 | 1.9x worse | 1.9 p/s |
 
-- Encoder: Linear(256 → concept_dim). Compresses hidden states.
-- Predictor: MLP(256→128→ReLU→concept_dim). Auxiliary: predict next concept vector.
-- Decoder: Linear(concept_dim → 98). Reconstructs token logits.
-- No hard masking, no top-k. Dense linear algebra only. Lesson from Exp 5.
-- Sweep: concept_dim in {32, 64, 128}, then full training at best dim.
+**Root cause:** At d_model=256 with 6 layers, the hidden states are already compressed representations. Adding another compression step (256→128→98) destroys token-prediction information. The bottleneck adds overhead without any benefit.
 
-**Parameter overhead:** ~63K (+1.5% over baseline). Negligible.
+**Verdict:** Concept bottleneck hypothesis falsified. Does not warrant integration.
 
-**Validation Metrics:**
-- PPL at matched step count vs baseline 5.39
-- Concept prediction MSE convergence rate
-- Inference speed
-
-**Failure Condition:** If concept-space PPL is consistently worse than token-space at same compute budget, concept bottleneck adds overhead without benefit.
+**Why it's fundamentally flawed:** In language models, hidden states ARE already the "concept space." A second bottleneck just loses information. Unlike image autoencoders (where pixel space >> concept space), there's no compression benefit.
 
 ---
 
@@ -171,21 +158,16 @@ Train end-to-end on TinyStories. Compare against Transformer baseline on same da
 | Block | Principle | Status |
 |-------|-----------|--------|
 | 1 | Adaptive depth | **Done** — 1.90× speedup, better PPL |
-| 2 | Predictive coding | **Done** — 13.3% skip, 0.93x speedup (negative result) |
-| 3 | Sparse representations | **Done** — top-k masking degrades quality + speed (negative result) |
-| 4 | Concept-space prediction | **Running** — Exp 6 concept bottleneck |
+| 2 | Predictive coding | **Done** — negative result (0.93x) |
+| 3 | Sparse representations | **Done** — negative result |
+| 4 | Concept-space prediction | **Done** — negative result (PPL 10.33) |
 | 5 | Hash-based memory | Planned |
 | 6 | Dual-speed learning | Planned |
 | 7 | Built-in grammar | Planned |
-| Integration | FlashLM v7 | After all blocks validated |
+| Integration | FlashLM v7 | **Next** — train.py with adaptive depth only |
 
-## The Vision (Honest Version)
+## Experiment Phase Conclusion
 
-```
-"CORTEX is a CPU-native architecture that improves the efficiency
- of language modeling by leveraging conditional computation,
- predictive coding, and learned sparse representations.
- Each component is individually validated before integration."
-```
+4 experiments completed. Only **adaptive depth** (Exp 3) proven effective. All other approaches (predictive coding, sparse representations, concept bottleneck) are negative results at this model scale.
 
-The grand vision stays. But it's built on verified components, not wishful thinking.
+**Final v7 CORTEX architecture**: RWKV backbone + adaptive depth + ternary weights (BitNet 1.58b). Train with TinyStories V2, BPE 4K vocab, target beat v5.2 (BPC 0.78).
