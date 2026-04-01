@@ -59,8 +59,8 @@ CONFIG = {
     'total_hours': 2.0,
 
     # Data
-    'data_dir': '/tmp/flashlm_v7',
-    'out_dir': '/tmp/flashlm_v7/out',
+    'data_dir': 'data_v7',
+    'out_dir': 'out_v7',
 
     # Logging
     'log_every': 50,
