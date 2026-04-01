@@ -589,12 +589,13 @@ def train(config):
     print(f"{'=' * 60}\n")
 
     t_start = time.time()
+    train_start = time.time()
     model.train()
 
     while True:
-        elapsed = time.time() - t_start
-        if elapsed / 3600 >= config['total_hours']:
-            print(f"\n  Time limit ({elapsed / 3600:.2f}h)")
+        train_elapsed = time.time() - train_start
+        if train_elapsed / 3600 >= config['total_hours']:
+            print(f"\n  Time limit ({train_elapsed / 3600:.2f}h training)")
             break
 
         optimizer.zero_grad(set_to_none=True)
@@ -618,11 +619,13 @@ def train(config):
         # Logging
         if step % config['log_every'] == 0:
             avg = log_loss / max(log_n, 1)
-            tps = tokens_seen / max(elapsed, 1)
+            train_elapsed = time.time() - train_start
+            tps = tokens_seen / max(train_elapsed, 1)
             ppl = math.exp(min(avg, 20))
-            print(f"  Step {step:5d} | Loss {avg:.4f} | PPL {ppl:7.2f} | "
+            remaining = max(config['total_hours'] * 3600 - train_elapsed, 0) / 3600
+            print(f"Step {step:5d} | Loss {avg:.4f} | PPL {ppl:6.2f} | "
                   f"LR {lr:.1e} | {tps:,.0f} tok/s | "
-                  f"{tokens_seen / 1e6:.2f}M | {elapsed / 3600:.2f}h")
+                  f"{tokens_seen / 1e6:.1f}M tok | ETA {remaining:.2f}h")
             log_loss, log_n = 0.0, 0
 
         # Evaluation
