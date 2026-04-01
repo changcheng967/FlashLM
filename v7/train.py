@@ -278,7 +278,7 @@ class CortexLM(nn.Module):
             exit_pred = el[:, :-1].argmax(dim=-1)
             conf_s = conf[:, :-1]  # (B, T-1, 1)
 
-            agreement = (exit_pred == final_pred).float().mean(dim=-1, keepdim=True)
+            agreement = (exit_pred == final_pred).float().unsqueeze(-1)  # (B, T-1, 1)
             cons = F.binary_cross_entropy(conf_s, agreement)
             total_loss = total_loss + self.consistency_w * cons
             stats[f'e{layer}_c'] = cons.item()
@@ -336,7 +336,8 @@ def prepare_data(config):
     data_dir = Path(config['data_dir'])
     data_dir.mkdir(exist_ok=True)
 
-    train_txt = data_dir / 'stories.txt'
+    train_txt = data_dir / 'train.txt'
+    val_txt = data_dir / 'valid.txt'
     tok_path = data_dir / 'tokenizer.json'
     train_bin = data_dir / 'train.bin'
     val_bin = data_dir / 'val.bin'
@@ -359,12 +360,19 @@ def prepare_data(config):
         print(f"  Data ready in {data_dir}")
         return tokenizer, str(train_bin), str(val_bin)
 
-    # Download (only valid split ~30MB, like v5.2)
+    # Download train split (~2GB)
     if not train_txt.exists():
-        print("  Downloading TinyStories V2...")
+        print("  Downloading TinyStories V2 train (~2GB)...")
         import urllib.request
-        urllib.request.urlretrieve(VALID_URL, str(train_txt))
-        print(f"    Downloaded: {train_txt.stat().st_size / 1e6:.1f} MB")
+        urllib.request.urlretrieve(TRAIN_URL, str(train_txt))
+        print(f"    {train_txt.stat().st_size / 1e6:.1f} MB")
+
+    # Download valid split (~30MB)
+    if not val_txt.exists():
+        print("  Downloading TinyStories V2 valid...")
+        import urllib.request
+        urllib.request.urlretrieve(VALID_URL, str(val_txt))
+        print(f"    {val_txt.stat().st_size / 1e6:.1f} MB")
 
     # Train BPE tokenizer
     print(f"  Training BPE tokenizer (vocab {config['vocab_size']})...")
@@ -384,46 +392,47 @@ def prepare_data(config):
     config['vocab_size'] = actual_vocab
     print(f"    Actual vocab: {actual_vocab}")
 
-    # Tokenize — same pattern as v5.2
-    print("  Tokenizing data...")
-    with open(train_txt, 'r', encoding='utf-8') as f:
-        text = f.read()
-
-    stories = [s.strip() for s in text.split('\n\n') if len(s.strip()) > 50]
-
-    tokens = []
-    eos_id = tokenizer.token_to_id("<eos>") or 0
-    max_tokens = 20_000_000
-
-    for i, story in enumerate(stories):
-        tokens.extend(tokenizer.encode(story).ids)
-        tokens.append(eos_id)
-        if len(tokens) >= max_tokens:
-            print(f"    Reached token limit: {len(tokens):,}")
-            break
-        if i % 5000 == 0 and i > 0:
-            print(f"    Processed {i} stories...", end='\r')
-
-    tokens = tokens[:max_tokens]
-    split = int(len(tokens) * 0.95)
-
-    # Write to /tmp first (s3fs can't handle rapid binary writes), then copy
+    # Stream-tokenize train set to /tmp (2GB text won't fit in RAM)
     import shutil, tempfile
-    tmp_dir = Path(tempfile.mkdtemp())
-    tmp_train = tmp_dir / 'train.bin'
-    tmp_val = tmp_dir / 'val.bin'
-    np.array(tokens[:split], dtype=np.uint16).tofile(str(tmp_train))
-    np.array(tokens[split:], dtype=np.uint16).tofile(str(tmp_val))
+    print("  Tokenizing train set (streaming)...")
+    tmp_train = tempfile.mktemp(suffix='.bin')
+    total_tokens = 0
+    with open(tmp_train, 'wb') as out_f:
+        with open(train_txt, 'r', encoding='utf-8', errors='ignore') as f:
+            cnt = 0
+            while True:
+                chunk = f.read(1_000_000)
+                if not chunk:
+                    break
+                ids = tokenizer.encode(chunk).ids
+                np.array(ids, dtype=np.uint16).tofile(out_f)
+                total_tokens += len(ids)
+                cnt += 1
+                if cnt % 50 == 0:
+                    print(f"    {total_tokens:,} tokens...", end='\r')
+                gc.collect()
     data_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(tmp_train), str(train_bin))
-    shutil.copy2(str(tmp_val), str(val_bin))
-    shutil.rmtree(str(tmp_dir))
+    shutil.copy2(tmp_train, str(train_bin))
+    os.remove(tmp_train)
+    print(f"    Train: {total_tokens:,} tokens                    ")
 
-    print(f"    Train: {split:,} tokens")
-    print(f"    Val:   {len(tokens) - split:,} tokens")
-
-    del tokens, text, stories
+    # Tokenize valid set (small, fits in RAM)
+    print("  Tokenizing valid set...")
+    tmp_val = tempfile.mktemp(suffix='.bin')
+    all_ids = []
+    with open(val_txt, 'r', encoding='utf-8', errors='ignore') as f:
+        while True:
+            chunk = f.read(1_000_000)
+            if not chunk:
+                break
+            all_ids.extend(tokenizer.encode(chunk).ids)
+    np.array(all_ids, dtype=np.uint16).tofile(tmp_val)
+    shutil.copy2(tmp_val, str(val_bin))
+    os.remove(tmp_val)
+    n_val = len(all_ids)
+    del all_ids
     gc.collect()
+    print(f"    Valid: {n_val:,} tokens")
 
     # Save meta
     with open(meta_path, 'w') as f:
