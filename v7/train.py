@@ -61,7 +61,7 @@ CONFIG = {
 
     # Data
     'data_dir': '/tmp/flashlm_v7',
-    'out_dir': 'out_v7',
+    'out_dir': '/tmp/flashlm_v7/out',
 
     # Logging
     'log_every': 50,
