@@ -514,19 +514,37 @@ class ModelC_GatedConv(nn.Module):
 
 
 # ============================================================================
-# EXP D: CORTEX-Lite — Novel multi-scale dilated gated conv + local attention
+# EXP D: CORTEX-II — Multi-Scale Adaptive Gated Convolution (MSAC)
 # ============================================================================
-# Key innovations over standard architectures at this scale:
-#   1. Dilated causal conv: exponential receptive field growth (1,2,4,8,16,32)
-#      → full 256-token coverage in 6 layers with kernel=3, no extra params
-#   2. Multi-scale: each layer sees a different dilation, capturing local→global
-#   3. Single-head local attention at last layer only: cheap global context
-#      (only ~65K params for the attention head, vs ~260K for full attention)
-#   4. Gated residual connections: data-dependent gating on each sublayer output
+# Novel architecture targeting all weaknesses of existing approaches:
+#
+# Weakness targeted → CORTEX-II solution:
+#   1. v4 Gated Conv: fixed kernel=8, RF=48 tokens
+#      → 3 parallel depthwise convs (k=3,5,7) per layer = multi-scale
+#   2. Transformer: O(n²) attention, QKV wastes params
+#      → Pure conv, no attention at all
+#   3. RWKV: fixed state can't compress enough info
+#      → No recurrent state, direct multi-scale context
+#   4. All: static mixing (same operation regardless of content)
+#      → Data-dependent scale fusion: input chooses which scale to use
+#   5. CORTEX-Lite: attention layer was overhead
+#      → No attention, replace with broader multi-scale conv
+#
+# Receptive field growth (kernel=7, dilation doubles per layer):
+#   Layer 0: dilation=1  → max RF=7
+#   Layer 1: dilation=2  → max RF=13
+#   Layer 2: dilation=4  → max RF=25
+#   Layer 3: dilation=8  → max RF=49
+#   Layer 4: dilation=16 → max RF=97
+#   Layer 5: dilation=32 → max RF=193 (covers 75% of 256-token context)
+#
+# Parameter efficiency: depthwise conv uses d_model params per kernel,
+# so 3 parallel convs cost only ~3.5K params per layer for mixing.
+# Bulk of params go to FFN where they matter most.
 # ============================================================================
 
 class DilatedCausalConv(nn.Module):
-    """Dilated depthwise causal conv — captures multi-scale patterns."""
+    """Dilated depthwise causal conv."""
     def __init__(self, d_model, kernel_size=3, dilation=1):
         super().__init__()
         self.pad = (kernel_size - 1) * dilation
@@ -536,130 +554,94 @@ class DilatedCausalConv(nn.Module):
 
     def forward(self, x):
         h = x.transpose(1, 2)
-        h = F.pad(h, (self.pad, 0))  # causal padding
+        h = F.pad(h, (self.pad, 0))
         h = self.conv(h)
         return h.transpose(1, 2)
 
 
-class GatedResidual(nn.Module):
-    """Data-dependent gating on residual connections."""
-    def __init__(self, d_model):
+class MSACMixer(nn.Module):
+    """Multi-Scale Adaptive Convolution mixer — CORTEX-II's core innovation.
+
+    Runs 3 parallel depthwise causal convs at different kernel sizes.
+    A data-dependent gate learns which scale is relevant per position.
+    Uses v4's efficient up→split→gate pattern for the output gate.
+    """
+    def __init__(self, d_model, base_dilation=1):
         super().__init__()
-        self.gate_linear = nn.Linear(d_model, d_model, bias=False)
-        nn.init.normal_(self.gate_linear.weight, std=0.02)
-
-    def forward(self, x, residual):
-        gate = torch.sigmoid(self.gate_linear(x))
-        return residual + gate * x
-
-
-class CheapLocalAttention(nn.Module):
-    """Single-head attention on last layer only — minimal params for global context."""
-    def __init__(self, d_model):
-        super().__init__()
-        self.d_head = d_model  # single head, all dims
-        self.scale = self.d_head ** -0.5
-        self.qk = nn.Linear(d_model, 2 * d_model, bias=False)
-        self.v = nn.Linear(d_model, d_model, bias=False)
-        self.out = nn.Linear(d_model, d_model, bias=False)
-        nn.init.normal_(self.qk.weight, std=0.02)
-        nn.init.normal_(self.v.weight, std=0.02)
-        nn.init.normal_(self.out.weight, std=0.02)
+        # 3 parallel depthwise convs: fine (k=3), medium (k=5), coarse (k=7)
+        self.conv_fine   = DilatedCausalConv(d_model, kernel_size=3, dilation=base_dilation)
+        self.conv_medium = DilatedCausalConv(d_model, kernel_size=5, dilation=base_dilation)
+        self.conv_coarse = DilatedCausalConv(d_model, kernel_size=7, dilation=base_dilation)
+        # Data-dependent scale fusion: input → 3 weights
+        # Init to zeros so softmax gives equal weight to all scales at start
+        self.scale_gate = nn.Linear(d_model, 3, bias=False)
+        nn.init.zeros_(self.scale_gate.weight)
+        # v4-style: up projection splits into gate + value
+        self.up = nn.Linear(d_model, d_model * 2, bias=False)
+        self.down = nn.Linear(d_model, d_model, bias=False)
+        nn.init.kaiming_normal_(self.up.weight, mode='fan_out')
+        nn.init.kaiming_normal_(self.down.weight, mode='fan_out')
 
     def forward(self, x):
-        B, T, D = x.shape
-        qk = self.qk(x)
-        q, k = qk.chunk(2, dim=-1)
-        v = self.v(x)
-        scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        mask = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1)
-        scores.masked_fill_(mask, float('-inf'))
-        attn = F.softmax(scores, dim=-1)
-        out = torch.matmul(attn, v)
-        return self.out(out)
+        # Up-project → split into sigmoid gate and value
+        gv = self.up(x)
+        gate, val = gv.chunk(2, dim=-1)
+        gate = torch.sigmoid(gate)
+        # Multi-scale conv on the value stream
+        c_fine   = self.conv_fine(val)
+        c_medium = self.conv_medium(val)
+        c_coarse = self.conv_coarse(val)
+        # Data-dependent scale fusion: softmax over 3 scales per position
+        scale_w = F.softmax(self.scale_gate(x), dim=-1)  # (B, T, 3)
+        fused = (scale_w[..., 0:1] * c_fine +
+                 scale_w[..., 1:2] * c_medium +
+                 scale_w[..., 2:3] * c_coarse)
+        # Gate the fused output, then project down
+        return self.down(fused * gate)
 
 
-class CortexLiteBlock(nn.Module):
-    """CORTEX-Lite block: dilated gated conv mixer + SwiGLU FFN + gated residual."""
-    def __init__(self, d_model, d_ff, dilation=1, kernel_size=3):
+class CortexIIBlock(nn.Module):
+    """CORTEX-II block: MSAC mixer + SwiGLU FFN, standard pre-norm residual."""
+    def __init__(self, d_model, d_ff, base_dilation=1):
         super().__init__()
-        # Dilated gated conv mixer
         self.ln1 = RMSNorm(d_model)
-        self.mixer_up = nn.Linear(d_model, d_model * 2, bias=False)
-        self.conv = DilatedCausalConv(d_model, kernel_size, dilation)
-        self.mixer_down = nn.Linear(d_model, d_model, bias=False)
-        self.gr1 = GatedResidual(d_model)
-
-        # SwiGLU FFN
+        self.mixer = MSACMixer(d_model, base_dilation)
         self.ln2 = RMSNorm(d_model)
         self.Wg = nn.Linear(d_model, d_ff, bias=False)
         self.Wu = nn.Linear(d_model, d_ff, bias=False)
         self.Wo = nn.Linear(d_ff, d_model, bias=False)
-        self.gr2 = GatedResidual(d_model)
-
-        for w in [self.mixer_up, self.mixer_down, self.Wg, self.Wu, self.Wo]:
+        for w in [self.Wg, self.Wu, self.Wo]:
             nn.init.kaiming_normal_(w.weight, mode='fan_out')
 
     def forward(self, x):
-        # Gated dilated conv mixer
-        h = self.ln1(x)
-        gv = self.mixer_up(h)
-        gate, val = gv.chunk(2, dim=-1)
-        gate = torch.sigmoid(gate)
-        conv_out = self.conv(val)
-        x = self.gr1(self.mixer_down(conv_out * gate), x)
-        # SwiGLU FFN
+        x = x + self.mixer(self.ln1(x))
         h = self.ln2(x)
-        x = self.gr2(self.Wo(F.silu(self.Wg(h)) * self.Wu(h)), x)
+        x = x + self.Wo(F.silu(self.Wg(h)) * self.Wu(h))
         return x
 
 
-class ModelD_CortexLite(nn.Module):
-    """CORTEX-Lite: Multi-scale dilated gated conv + cheap local attention.
+class ModelD_CortexII(nn.Module):
+    """CORTEX-II: Multi-Scale Adaptive Gated Convolution.
 
-    Receptive field per layer (kernel=3, dilation doubles):
-      Layer 0: dilation=1  → RF=3
-      Layer 1: dilation=2  → RF=5
-      Layer 2: dilation=4  → RF=9
-      Layer 3: dilation=8  → RF=17
-      Layer 4: dilation=16 → RF=33
-      Layer 5: local attention → full 256-token context
+    6 layers with exponentially growing dilation (1,2,4,8,16,32).
+    Each layer has 3 parallel depthwise convs at kernel=3,5,7.
+    Data-dependent fusion learns which scale matters per position.
     """
-    def __init__(self, vocab, d_model, n_layers, d_ff, kernel_size=3):
+    def __init__(self, vocab, d_model, n_layers, d_ff):
         super().__init__()
         self.embed = nn.Embedding(vocab, d_model)
-        self.ln_in = RMSNorm(d_model)
-        # Dilations double each layer for exponential receptive field growth
         dilations = [2**i for i in range(n_layers)]
         self.blocks = nn.ModuleList([
-            CortexLiteBlock(d_model, d_ff, dilation=d, kernel_size=kernel_size)
-            for d in dilations[:-1]])
-        # Last layer: single-head attention for global context
-        self.attn_ln = RMSNorm(d_model)
-        self.attn = CheapLocalAttention(d_model)
-        self.attn_gr = GatedResidual(d_model)
-        self.attn_ffn_ln = RMSNorm(d_model)
-        self.attn_Wg = nn.Linear(d_model, d_ff, bias=False)
-        self.attn_Wu = nn.Linear(d_model, d_ff, bias=False)
-        self.attn_Wo = nn.Linear(d_ff, d_model, bias=False)
-        self.attn_ffn_gr = GatedResidual(d_model)
-        for w in [self.attn_Wg, self.attn_Wu, self.attn_Wo]:
-            nn.init.kaiming_normal_(w.weight, mode='fan_out')
-
+            CortexIIBlock(d_model, d_ff, base_dilation=d) for d in dilations])
         self.ln_out = RMSNorm(d_model)
         self.head = nn.Linear(d_model, vocab, bias=False)
         self.head.weight = self.embed.weight
         nn.init.normal_(self.embed.weight, std=0.02)
 
     def forward(self, x, targets=None):
-        h = self.ln_in(self.embed(x))
-        # Dilated conv blocks
+        h = self.embed(x)
         for block in self.blocks:
             h = block(h)
-        # Single attention layer for global context
-        h = self.attn_gr(self.attn(self.attn_ln(h)), h)
-        ah = self.attn_ffn_ln(h)
-        h = self.attn_ffn_gr(self.attn_Wo(F.silu(self.attn_Wg(ah)) * self.attn_Wu(ah)), h)
         logits = self.head(self.ln_out(h))
         if targets is None:
             return logits
@@ -881,14 +863,12 @@ def run_experiment(name, model, train_ds, val_data, tokenizer, minutes):
 def main():
     parser = argparse.ArgumentParser(description="FlashLM v7 Architecture Experiments")
     parser.add_argument('--minutes', type=float, default=15, help='Minutes per experiment')
+    parser.add_argument('--full', action='store_true', help='Run all 5 experiments (default: top 2 only)')
     args = parser.parse_args()
 
     print(f"\n{'=' * 60}")
-    print(f"  FlashLM v7 — Architecture Experiments")
+    print(f"  FlashLM v7.1 CORTEX-II — Architecture Experiments")
     print(f"{'=' * 60}")
-    print(f"  {args.minutes} min per experiment | 5 experiments | ~{args.minutes * 5:.0f} min total")
-    print(f"  PyTorch {torch.__version__} | 2 threads | {D_MODEL}d | {N_LAYERS}L")
-    print(f"  LR={MAX_LR:.0e} warmup={WARMUP} wd={WEIGHT_DECAY} batch={BATCH_SIZE}\n")
 
     # Prepare data (shared)
     print("--- Data ---")
@@ -897,35 +877,37 @@ def main():
     # Run experiments
     results = []
 
-    # Exp A: Transformer Full Precision
-    model_a = ModelB_Transformer(vocab, D_MODEL, N_LAYERS, n_heads=4, d_ff=D_FF)
-    r_a = run_experiment("Exp A: Transformer", model_a, train_ds, val_data, tokenizer, args.minutes)
-    results.append(r_a)
-    del model_a; gc.collect()
+    if args.full:
+        # Full 5-experiment comparison
+        print(f"  {args.minutes} min per experiment | 5 experiments | ~{args.minutes * 5:.0f} min total")
+        print(f"  LR={MAX_LR:.0e} warmup={WARMUP} wd={WEIGHT_DECAY} batch={BATCH_SIZE}\n")
 
-    # Exp B: RWKV Full Precision
-    model_b = ModelA_RWKV(vocab, D_MODEL, N_LAYERS, D_FF)
-    r_b = run_experiment("Exp B: RWKV", model_b, train_ds, val_data, tokenizer, args.minutes)
-    results.append(r_b)
-    del model_b; gc.collect()
+        model_a = ModelB_Transformer(vocab, D_MODEL, N_LAYERS, n_heads=4, d_ff=D_FF)
+        r_a = run_experiment("Exp A: Transformer", model_a, train_ds, val_data, tokenizer, args.minutes)
+        results.append(r_a); del model_a; gc.collect()
 
-    # Exp C: Gated Conv (v4 "Bolt" style)
-    model_c = ModelC_GatedConv(vocab, D_MODEL, N_LAYERS, D_FF, kernel_size=8)
-    r_c = run_experiment("Exp C: Gated Conv (v4)", model_c, train_ds, val_data, tokenizer, args.minutes)
-    results.append(r_c)
-    del model_c; gc.collect()
+        model_b = ModelA_RWKV(vocab, D_MODEL, N_LAYERS, D_FF)
+        r_b = run_experiment("Exp B: RWKV", model_b, train_ds, val_data, tokenizer, args.minutes)
+        results.append(r_b); del model_b; gc.collect()
 
-    # Exp D: CORTEX-Lite (our novel architecture)
-    model_d = ModelD_CortexLite(vocab, D_MODEL, N_LAYERS, D_FF, kernel_size=3)
-    r_d = run_experiment("Exp D: CORTEX-Lite (novel)", model_d, train_ds, val_data, tokenizer, args.minutes)
-    results.append(r_d)
-    del model_d; gc.collect()
+        model_c = ModelC_GatedConv(vocab, D_MODEL, N_LAYERS, D_FF, kernel_size=8)
+        r_c = run_experiment("Exp C: Gated Conv (v4)", model_c, train_ds, val_data, tokenizer, args.minutes)
+        results.append(r_c); del model_c; gc.collect()
 
-    # Exp E: RWKV + Adaptive Depth
-    model_e = ModelE_RWKV_Adaptive(vocab, D_MODEL, N_LAYERS, D_FF, exit_layers=[2, 4])
-    r_e = run_experiment("Exp E: RWKV + Adaptive", model_e, train_ds, val_data, tokenizer, args.minutes)
-    results.append(r_e)
-    del model_e; gc.collect()
+    # Always run CORTEX-II vs Gated Conv head-to-head
+    n_exp = 2 if not args.full else 0
+    print(f"  CORTEX-II vs Gated Conv | {args.minutes} min each | ~{args.minutes * n_exp:.0f} min total")
+    print(f"  LR={MAX_LR:.0e} warmup={WARMUP} wd={WEIGHT_DECAY} batch={BATCH_SIZE}\n")
+
+    # Gated Conv baseline (v4 style — the one to beat)
+    model_gc = ModelC_GatedConv(vocab, D_MODEL, N_LAYERS, D_FF, kernel_size=8)
+    r_gc = run_experiment("Gated Conv (v4 baseline)", model_gc, train_ds, val_data, tokenizer, args.minutes)
+    results.append(r_gc); del model_gc; gc.collect()
+
+    # CORTEX-II (our novel MSAC architecture)
+    model_cii = ModelD_CortexII(vocab, D_MODEL, N_LAYERS, D_FF)
+    r_cii = run_experiment("CORTEX-II (MSAC novel)", model_cii, train_ds, val_data, tokenizer, args.minutes)
+    results.append(r_cii); del model_cii; gc.collect()
 
     # Comparison table
     print(f"\n\n{'=' * 75}")
