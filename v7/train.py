@@ -344,14 +344,12 @@ def prepare_data(config):
     meta_path = data_dir / 'meta.json'
 
     # Check if data already prepared
-    needs_regen = False
-    if meta_path.exists():
+    needs_regen = not meta_path.exists() or not train_bin.exists() or not val_bin.exists()
+    if not needs_regen:
         with open(meta_path, 'r') as f:
             meta = json.load(f)
-        if meta.get('vocab') != config['vocab_size'] or not train_bin.exists():
+        if meta.get('vocab') != config['vocab_size']:
             needs_regen = True
-    else:
-        needs_regen = True
 
     if not needs_regen:
         from tokenizers import Tokenizer
