@@ -375,32 +375,30 @@ def prepare_data(config):
     config['vocab_size'] = tokenizer.get_vocab_size()
     print(f"  Vocab: {config['vocab_size']}")
 
-    # Tokenize train
+    # Tokenize train — stream to disk, never hold all in RAM
     if not train_bin.exists():
-        print("  Tokenizing train set...")
+        print("  Tokenizing train set (streaming to disk)...")
         total_chars = train_txt.stat().st_size
-        all_ids = []
-        with open(train_txt, 'r', encoding='utf-8', errors='ignore') as f:
-            cnt = 0
-            while True:
-                chunk = f.read(1_000_000)
-                if not chunk:
-                    break
-                all_ids.extend(tokenizer.encode(chunk).ids)
-                cnt += 1
-                if cnt % 20 == 0:
-                    print(f"    {len(all_ids):,} tokens...")
-                gc.collect()
+        total_tokens = 0
+        with open(train_bin, 'wb') as out_f:
+            with open(train_txt, 'r', encoding='utf-8', errors='ignore') as f:
+                cnt = 0
+                while True:
+                    chunk = f.read(1_000_000)
+                    if not chunk:
+                        break
+                    ids = tokenizer.encode(chunk).ids
+                    np.array(ids, dtype=np.uint16).tofile(out_f)
+                    total_tokens += len(ids)
+                    cnt += 1
+                    if cnt % 20 == 0:
+                        print(f"    {total_tokens:,} tokens...")
+                    gc.collect()
 
-        tokens = np.array(all_ids, dtype=np.uint16)
-        tokens.tofile(str(train_bin))
-        del all_ids
-        gc.collect()
-
-        avg_cpt = total_chars / max(len(tokens), 1)
+        avg_cpt = total_chars / max(total_tokens, 1)
         with open(meta_path, 'w') as f:
             json.dump({'avg_chars_per_token': avg_cpt}, f)
-        print(f"  Train: {len(tokens):,} tokens ({avg_cpt:.2f} chars/tok)")
+        print(f"  Train: {total_tokens:,} tokens ({avg_cpt:.2f} chars/tok)")
 
     # Tokenize valid
     if not val_bin.exists():
@@ -431,8 +429,8 @@ def prepare_data(config):
 def get_batch(data, batch_size, seq_len):
     max_start = len(data) - seq_len - 1
     ix = torch.randint(0, max_start, (batch_size,))
-    x = torch.stack([data[i:i + seq_len] for i in ix])
-    y = torch.stack([data[i + 1:i + seq_len + 1] for i in ix])
+    x = torch.stack([torch.from_numpy(data[i:i + seq_len].astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy(data[i + 1:i + seq_len + 1].astype(np.int64)) for i in ix])
     return x, y
 
 
@@ -453,11 +451,11 @@ def get_lr(step, config):
 # EVALUATION
 # ============================================================================
 @torch.no_grad()
-def evaluate(model, val_data, config, avg_cpt, max_batches=30):
+def evaluate(model, val_mmap, config, avg_cpt, max_batches=30):
     model.eval()
     total_loss, total_tokens = 0.0, 0
-    for _ in range(min(max_batches, len(val_data) // config['seq_len'])):
-        x, y = get_batch(val_data, config['batch_size'], config['seq_len'])
+    for _ in range(min(max_batches, len(val_mmap) // config['seq_len'])):
+        x, y = get_batch(val_mmap, config['batch_size'], config['seq_len'])
         _, loss, _ = model(x, targets=y)
         total_loss += loss.item() * x.numel()
         total_tokens += x.numel()
@@ -553,11 +551,9 @@ def train(config):
     # Data
     print("--- Data ---")
     tokenizer, train_bin, val_bin, avg_cpt = prepare_data(config)
-    train_data = torch.from_numpy(
-        np.array(np.memmap(train_bin, dtype=np.uint16, mode='r'), dtype=np.int64))
-    val_data = torch.from_numpy(
-        np.array(np.memmap(val_bin, dtype=np.uint16, mode='r'), dtype=np.int64))
-    print(f"  Train: {len(train_data):,} tokens | Val: {len(val_data):,} tokens\n")
+    train_mmap = np.memmap(train_bin, dtype=np.uint16, mode='r')
+    val_mmap = np.memmap(val_bin, dtype=np.uint16, mode='r')
+    print(f"  Train: {len(train_mmap):,} tokens | Val: {len(val_mmap):,} tokens\n")
 
     # Model
     model = CortexLM(config)
@@ -604,7 +600,7 @@ def train(config):
         optimizer.zero_grad(set_to_none=True)
 
         for _ in range(config['grad_accum']):
-            x, y = get_batch(train_data, config['batch_size'], config['seq_len'])
+            x, y = get_batch(train_mmap, config['batch_size'], config['seq_len'])
             _, loss, stats = model(x, targets=y)
             (loss / config['grad_accum']).backward()
             log_loss += stats['total']
@@ -631,7 +627,7 @@ def train(config):
 
         # Evaluation
         if step % config['eval_every'] == 0:
-            m = evaluate(model, val_data, config, avg_cpt)
+            m = evaluate(model, val_mmap, config, avg_cpt)
             tag = ''
             if m['loss'] < best_val:
                 best_val = m['loss']
@@ -667,7 +663,7 @@ def train(config):
             gc.collect()
 
     # --- Final ---
-    final = evaluate(model, val_data, config, avg_cpt)
+    final = evaluate(model, val_mmap, config, avg_cpt)
     inf_full, inf_adapt = benchmark_inference(model, config)
 
     print(f"\n{'=' * 60}")
