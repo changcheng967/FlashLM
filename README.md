@@ -140,12 +140,7 @@ FlashLM/
 ├── LICENSE
 ├── v7/
 │   ├── train.py                           ← v7 CORTEX training (active)
-│   ├── PROJECT_PLAN.md                    ← Experiment roadmap
-│   ├── experiment_adaptive_depth.py       ← Exp 1-3 (the win)
-│   ├── experiment4_predictive_coding.py   ← Exp 4 (negative)
-│   ├── experiment5_sparse_representations.py  ← Exp 5 (negative)
-│   ├── experiment6_concept_prediction.py  ← Exp 6 (negative)
-│   └── experiment[1-6]_results.md         ← Detailed reports
+│   └── experiment[1-6]_results.md         ← Experiment reports
 └── archive/
     ├── eval_bpc.py                        ← BPC evaluation
     ├── train_v4.py                        ← v4 Bolt
