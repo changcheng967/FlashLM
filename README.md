@@ -149,8 +149,8 @@ FlashLM/
 └── archive/
     ├── eval_bpc.py                        ← BPC evaluation
     ├── train_v4.py                        ← v4 Bolt
-    ├── train_v6_supernova.py              ← v6 SUPERNOVA
-    └── train_v52.py                       ← v5.2 Nova-Ignition
+    ├── train_v52_nova_ignition.py         ← v5.2 Nova-Ignition
+    └── train_v6_supernova.py              ← v6 SUPERNOVA
 ```
 
 ---
