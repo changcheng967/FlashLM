@@ -410,20 +410,17 @@ def prepare_data(config):
     np.array(tokens[:split], dtype=np.uint16).tofile(str(train_bin))
     np.array(tokens[split:], dtype=np.uint16).tofile(str(val_bin))
 
-    del tokens, text, stories
-    gc.collect()
-
     print(f"    Train: {split:,} tokens")
     print(f"    Val:   {len(tokens) - split:,} tokens")
+
+    del tokens, text, stories
+    gc.collect()
 
     # Save meta
     with open(meta_path, 'w') as f:
         json.dump({'vocab': config['vocab_size'], 'actual_vocab': actual_vocab}, f)
 
-    with open(meta_path) as f:
-        avg_cpt = json.load(f)['avg_chars_per_token']
-
-    return tokenizer, str(train_bin), str(val_bin), avg_cpt
+    return tokenizer, str(train_bin), str(val_bin)
 
 
 # ============================================================================
