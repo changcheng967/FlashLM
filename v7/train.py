@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pathlib import Path
+from torch.utils.data import Dataset, DataLoader
 
 
 # ============================================================================
@@ -335,87 +336,89 @@ def prepare_data(config):
     data_dir = Path(config['data_dir'])
     data_dir.mkdir(exist_ok=True)
 
-    train_txt = data_dir / 'train.txt'
-    val_txt = data_dir / 'valid.txt'
+    train_txt = data_dir / 'stories.txt'
     tok_path = data_dir / 'tokenizer.json'
     train_bin = data_dir / 'train.bin'
-    val_bin = data_dir / 'valid.bin'
+    val_bin = data_dir / 'val.bin'
     meta_path = data_dir / 'meta.json'
 
-    # Download
-    if not train_txt.exists():
-        print("  Downloading TinyStories V2 train (~2GB)...")
-        import urllib.request
-        urllib.request.urlretrieve(TRAIN_URL, str(train_txt))
-        print(f"    {train_txt.stat().st_size / 1e6:.1f} MB")
+    # Check if data already prepared
+    needs_regen = False
+    if meta_path.exists():
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        if meta.get('vocab') != config['vocab_size'] or not train_bin.exists():
+            needs_regen = True
+    else:
+        needs_regen = True
 
-    if not val_txt.exists():
-        print("  Downloading TinyStories V2 valid...")
+    if not needs_regen:
+        from tokenizers import Tokenizer
+        tokenizer = Tokenizer.from_file(str(tok_path))
+        config['vocab_size'] = tokenizer.get_vocab_size()
+        print(f"  Data ready in {data_dir}")
+        return tokenizer, str(train_bin), str(val_bin)
+
+    # Download (only valid split ~30MB, like v5.2)
+    if not train_txt.exists():
+        print("  Downloading TinyStories V2...")
         import urllib.request
-        urllib.request.urlretrieve(VALID_URL, str(val_txt))
-        print(f"    {val_txt.stat().st_size / 1e6:.1f} MB")
+        urllib.request.urlretrieve(VALID_URL, str(train_txt))
+        print(f"    Downloaded: {train_txt.stat().st_size / 1e6:.1f} MB")
 
     # Train BPE tokenizer
-    if not tok_path.exists():
-        print("  Training BPE tokenizer (4K vocab)...")
-        from tokenizers import Tokenizer
-        from tokenizers.models import BPE
-        from tokenizers.trainers import BpeTrainer
-        from tokenizers.pre_tokenizers import ByteLevel
-
-        tok = Tokenizer(BPE())
-        tok.pre_tokenizer = ByteLevel()
-        tok.train(files=[str(train_txt)], trainer=BpeTrainer(
-            vocab_size=config['vocab_size'], min_frequency=2,
-            special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"]))
-        tok.save(str(tok_path))
-
+    print(f"  Training BPE tokenizer (vocab {config['vocab_size']})...")
     from tokenizers import Tokenizer
-    tokenizer = Tokenizer.from_file(str(tok_path))
-    config['vocab_size'] = tokenizer.get_vocab_size()
-    print(f"  Vocab: {config['vocab_size']}")
+    from tokenizers.models import BPE
+    from tokenizers.trainers import BpeTrainer
+    from tokenizers.pre_tokenizers import ByteLevel
 
-    # Tokenize train — stream to disk, never hold all in RAM
-    if not train_bin.exists():
-        print("  Tokenizing train set (streaming to disk)...")
-        total_chars = train_txt.stat().st_size
-        total_tokens = 0
-        with open(train_bin, 'wb') as out_f:
-            with open(train_txt, 'r', encoding='utf-8', errors='ignore') as f:
-                cnt = 0
-                while True:
-                    chunk = f.read(1_000_000)
-                    if not chunk:
-                        break
-                    ids = tokenizer.encode(chunk).ids
-                    np.array(ids, dtype=np.uint16).tofile(out_f)
-                    total_tokens += len(ids)
-                    cnt += 1
-                    if cnt % 20 == 0:
-                        print(f"    {total_tokens:,} tokens...")
-                    gc.collect()
+    tokenizer = Tokenizer(BPE())
+    tokenizer.pre_tokenizer = ByteLevel()
+    tokenizer.train(files=[str(train_txt)], trainer=BpeTrainer(
+        vocab_size=config['vocab_size'], min_frequency=2,
+        special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"]))
+    tokenizer.save(str(tok_path))
 
-        avg_cpt = total_chars / max(total_tokens, 1)
-        with open(meta_path, 'w') as f:
-            json.dump({'avg_chars_per_token': avg_cpt}, f)
-        print(f"  Train: {total_tokens:,} tokens ({avg_cpt:.2f} chars/tok)")
+    actual_vocab = tokenizer.get_vocab_size()
+    config['vocab_size'] = actual_vocab
+    print(f"    Actual vocab: {actual_vocab}")
 
-    # Tokenize valid
-    if not val_bin.exists():
-        print("  Tokenizing valid set...")
-        all_ids = []
-        with open(val_txt, 'r', encoding='utf-8', errors='ignore') as f:
-            while True:
-                chunk = f.read(1_000_000)
-                if not chunk:
-                    break
-                all_ids.extend(tokenizer.encode(chunk).ids)
+    # Tokenize — same pattern as v5.2
+    print("  Tokenizing data...")
+    with open(train_txt, 'r', encoding='utf-8') as f:
+        text = f.read()
 
-        np.array(all_ids, dtype=np.uint16).tofile(str(val_bin))
-        del all_ids
-        gc.collect()
-        n_val = len(np.memmap(str(val_bin), dtype=np.uint16, mode='r'))
-        print(f"  Valid: {n_val:,} tokens")
+    stories = [s.strip() for s in text.split('\n\n') if len(s.strip()) > 50]
+
+    tokens = []
+    eos_id = tokenizer.token_to_id("<eos>") or 0
+    max_tokens = 20_000_000
+
+    for i, story in enumerate(stories):
+        tokens.extend(tokenizer.encode(story).ids)
+        tokens.append(eos_id)
+        if len(tokens) >= max_tokens:
+            print(f"    Reached token limit: {len(tokens):,}")
+            break
+        if i % 5000 == 0 and i > 0:
+            print(f"    Processed {i} stories...", end='\r')
+
+    tokens = tokens[:max_tokens]
+    split = int(len(tokens) * 0.95)
+
+    np.array(tokens[:split], dtype=np.uint16).tofile(str(train_bin))
+    np.array(tokens[split:], dtype=np.uint16).tofile(str(val_bin))
+
+    del tokens, text, stories
+    gc.collect()
+
+    print(f"    Train: {split:,} tokens")
+    print(f"    Val:   {len(tokens) - split:,} tokens")
+
+    # Save meta
+    with open(meta_path, 'w') as f:
+        json.dump({'vocab': config['vocab_size'], 'actual_vocab': actual_vocab}, f)
 
     with open(meta_path) as f:
         avg_cpt = json.load(f)['avg_chars_per_token']
@@ -424,14 +427,23 @@ def prepare_data(config):
 
 
 # ============================================================================
-# BATCH SAMPLING
+# FAST DATASET — Same as v5.2
 # ============================================================================
-def get_batch(data, batch_size, seq_len):
-    max_start = len(data) - seq_len - 1
-    ix = torch.randint(0, max_start, (batch_size,))
-    x = torch.stack([torch.from_numpy(data[i:i + seq_len].astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy(data[i + 1:i + seq_len + 1].astype(np.int64)) for i in ix])
-    return x, y
+class FastDataset(Dataset):
+    def __init__(self, bin_path, seq_len):
+        self.seq_len = seq_len
+        self.data = np.memmap(str(bin_path), dtype=np.uint16, mode='r')
+        self.n = (len(self.data) - 1) // seq_len
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, idx):
+        i = idx * self.seq_len
+        chunk = self.data[i : i + self.seq_len + 1]
+        x = torch.from_numpy(chunk[:-1].astype(np.int32))
+        y = torch.from_numpy(chunk[1:].astype(np.int32))
+        return x.long(), y.long()
 
 
 # ============================================================================
@@ -451,19 +463,30 @@ def get_lr(step, config):
 # EVALUATION
 # ============================================================================
 @torch.no_grad()
-def evaluate(model, val_mmap, config, avg_cpt, max_batches=30):
+def evaluate(model, val_data, config, max_batches=20):
     model.eval()
-    total_loss, total_tokens = 0.0, 0
-    for _ in range(min(max_batches, len(val_mmap) // config['seq_len'])):
-        x, y = get_batch(val_mmap, config['batch_size'], config['seq_len'])
+    losses = []
+    seq_len = config['seq_len']
+    n = (len(val_data) - 1) // seq_len
+    if n == 0:
+        return {'loss': 99.0, 'ppl': 99.0}
+
+    for _ in range(min(max_batches, n // config['batch_size'])):
+        batch_x, batch_y = [], []
+        for _ in range(config['batch_size']):
+            i = np.random.randint(0, n) * seq_len
+            chunk = val_data[i:i + seq_len + 1]
+            batch_x.append(chunk[:-1])
+            batch_y.append(chunk[1:])
+        x = torch.tensor(np.stack(batch_x), dtype=torch.long)
+        y = torch.tensor(np.stack(batch_y), dtype=torch.long)
         _, loss, _ = model(x, targets=y)
-        total_loss += loss.item() * x.numel()
-        total_tokens += x.numel()
+        losses.append(loss.item())
+
     model.train()
-    avg = total_loss / max(total_tokens, 1)
+    avg = sum(losses) / len(losses)
     ppl = math.exp(min(avg, 20))
-    bpc = avg * math.log2(math.e) / avg_cpt
-    return {'loss': avg, 'ppl': ppl, 'bpc': bpc}
+    return {'loss': avg, 'ppl': ppl}
 
 
 # ============================================================================
@@ -550,10 +573,22 @@ def train(config):
 
     # Data
     print("--- Data ---")
-    tokenizer, train_bin, val_bin, avg_cpt = prepare_data(config)
-    train_mmap = np.memmap(train_bin, dtype=np.uint16, mode='r')
-    val_mmap = np.memmap(val_bin, dtype=np.uint16, mode='r')
-    print(f"  Train: {len(train_mmap):,} tokens | Val: {len(val_mmap):,} tokens\n")
+    tokenizer, train_bin, val_bin = prepare_data(config)
+    config['vocab_size'] = tokenizer.get_vocab_size()
+
+    # Val data — same as v5.2: np.fromfile then astype int32
+    val_raw = np.fromfile(str(Path(config['data_dir']) / 'val.bin'), dtype=np.uint16)
+    val_data = val_raw.astype(np.int32)
+    print(f"  Val: {len(val_data):,} tokens")
+
+    # Train dataset — same as v5.2: FastDataset + DataLoader
+    train_ds = FastDataset(
+        str(Path(config['data_dir']) / 'train.bin'),
+        config['seq_len'])
+    train_dl = DataLoader(
+        train_ds, batch_size=config['batch_size'],
+        shuffle=True, num_workers=0, drop_last=True, pin_memory=False)
+    print(f"  Train: {len(train_ds) * config['seq_len']:,} tokens\n")
 
     # Model
     model = CortexLM(config)
@@ -564,7 +599,7 @@ def train(config):
         betas=(0.9, 0.95), weight_decay=config['weight_decay'])
 
     # Resume
-    step, tokens_seen, best_val, best_bpc = 0, 0, float('inf'), float('inf')
+    step, tokens_seen, best_val = 0, 0, float('inf')
     ckpt_path = out_dir / 'latest.pt'
     if ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
@@ -573,7 +608,6 @@ def train(config):
         step = ckpt.get('step', 0)
         tokens_seen = ckpt.get('tokens', 0)
         best_val = ckpt.get('best_val', float('inf'))
-        best_bpc = ckpt.get('best_bpc', float('inf'))
         print(f"  Resumed: step {step}, {tokens_seen / 1e6:.1f}M tokens\n")
 
     # Speed calibration
@@ -591,6 +625,7 @@ def train(config):
     t_start = time.time()
     train_start = time.time()
     model.train()
+    train_iter = iter(train_dl)
 
     while True:
         train_elapsed = time.time() - train_start
@@ -601,7 +636,11 @@ def train(config):
         optimizer.zero_grad(set_to_none=True)
 
         for _ in range(config['grad_accum']):
-            x, y = get_batch(train_mmap, config['batch_size'], config['seq_len'])
+            try:
+                x, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_dl)
+                x, y = next(train_iter)
             _, loss, stats = model(x, targets=y)
             (loss / config['grad_accum']).backward()
             log_loss += stats['total']
@@ -630,16 +669,13 @@ def train(config):
 
         # Evaluation
         if step % config['eval_every'] == 0:
-            m = evaluate(model, val_mmap, config, avg_cpt)
+            m = evaluate(model, val_data, config)
             tag = ''
             if m['loss'] < best_val:
                 best_val = m['loss']
                 torch.save(model.state_dict(), out_dir / 'best.pt')
                 tag = ' *'
-            if m['bpc'] < best_bpc:
-                best_bpc = m['bpc']
-            print(f"  >>> VAL loss={m['loss']:.4f} PPL={m['ppl']:.2f} "
-                  f"BPC={m['bpc']:.4f}{tag}")
+            print(f"  >>> VAL loss={m['loss']:.4f} PPL={m['ppl']:.2f}{tag}")
 
         # Generation
         if step % config['gen_every'] == 0 and step > 0:
@@ -656,7 +692,7 @@ def train(config):
         if step % config['save_every'] == 0:
             torch.save({
                 'step': step, 'tokens': tokens_seen,
-                'best_val': best_val, 'best_bpc': best_bpc,
+                'best_val': best_val,
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
             }, ckpt_path)
@@ -666,7 +702,7 @@ def train(config):
             gc.collect()
 
     # --- Final ---
-    final = evaluate(model, val_mmap, config, avg_cpt)
+    final = evaluate(model, val_data, config)
     inf_full, inf_adapt = benchmark_inference(model, config)
 
     print(f"\n{'=' * 60}")
@@ -677,9 +713,7 @@ def train(config):
     print(f"  Time:       {(time.time() - t_start) / 3600:.2f}h")
     print(f"  Val loss:   {final['loss']:.4f}")
     print(f"  Val PPL:    {final['ppl']:.2f}")
-    print(f"  Val BPC:    {final['bpc']:.4f}")
     print(f"  Best PPL:   {math.exp(min(best_val, 20)):.2f}")
-    print(f"  Best BPC:   {best_bpc:.4f}")
     print(f"  Inf speed:  {inf_full:.1f} tok/s (full), "
           f"{inf_adapt:.1f} tok/s (adaptive) "
           f"({inf_adapt / max(inf_full, 1e-6):.2f}x)")
@@ -704,11 +738,9 @@ def train(config):
         'tokens_seen': tokens_seen,
         'val_loss': final['loss'],
         'val_ppl': final['ppl'],
-        'val_bpc': final['bpc'],
-        'best_bpc': best_bpc,
         'inf_tok_s': inf_full,
         'inf_tok_s_adaptive': inf_adapt,
-    }, out_dir / 'results.json', indent=2)
+    }, open(out_dir / 'results.json', 'w'), indent=2)
     print(f"\n  Saved to {out_dir}/")
 
 
