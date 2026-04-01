@@ -134,19 +134,24 @@ Every weight in FlashLM's hidden layers is {-1, 0, +1}. Trained from scratch via
 
 ## Files
 
-| File | Description |
-|---|---|
-| `v7/train.py` | **v7 CORTEX training** — ternary RWKV + adaptive depth |
-| `v7/PROJECT_PLAN.md` | Experiment roadmap and results summary |
-| `v7/experiment_adaptive_depth.py` | Exp 1-3: adaptive depth (the successful one) |
-| `v7/experiment4_predictive_coding.py` | Exp 4: predictive coding |
-| `v7/experiment5_sparse_representations.py` | Exp 5: sparse representations |
-| `v7/experiment6_concept_prediction.py` | Exp 6: concept-space bottleneck |
-| `v7/experiment1_results.md` through `experiment6_results.md` | Detailed experiment reports |
-| `train.py` | v6 SUPERNOVA training (archived) |
-| `train_v52.py` | v5.2 Nova-Ignition training |
-| `trainv4.py` | v4 Bolt (archived) |
-| `eval_bpc.py` | BPC evaluation script |
+```
+FlashLM/
+├── README.md
+├── LICENSE
+├── v7/
+│   ├── train.py                           ← v7 CORTEX training (active)
+│   ├── PROJECT_PLAN.md                    ← Experiment roadmap
+│   ├── experiment_adaptive_depth.py       ← Exp 1-3 (the win)
+│   ├── experiment4_predictive_coding.py   ← Exp 4 (negative)
+│   ├── experiment5_sparse_representations.py  ← Exp 5 (negative)
+│   ├── experiment6_concept_prediction.py  ← Exp 6 (negative)
+│   └── experiment[1-6]_results.md         ← Detailed reports
+└── archive/
+    ├── eval_bpc.py                        ← BPC evaluation
+    ├── train_v4.py                        ← v4 Bolt
+    ├── train_v6_supernova.py              ← v6 SUPERNOVA
+    └── train_v52.py                       ← v5.2 Nova-Ignition
+```
 
 ---
 
