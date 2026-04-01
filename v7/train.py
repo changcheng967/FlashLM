@@ -407,6 +407,7 @@ def prepare_data(config):
     tokens = tokens[:max_tokens]
     split = int(len(tokens) * 0.95)
 
+    data_dir.mkdir(parents=True, exist_ok=True)
     np.array(tokens[:split], dtype=np.uint16).tofile(str(train_bin))
     np.array(tokens[split:], dtype=np.uint16).tofile(str(val_bin))
 
