@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 """
-FlashLM v7.1 CORTEX-III v2 — Refined Architecture Experiment
-=============================================================
-Tests two fixes for CORTEX-III's failures (k=3 too narrow at layer 0,
-dilation too sparse at deep layers) against Gated Conv baseline.
+FlashLM v7.1 CORTEX-III — Training Script
+============================================
+Gated Conv with large kernel (k=15), trained on TinyStories V2.
+Config determined through systematic architecture + ablation experiments.
 
-  Variant A: Gated Conv (k=8, no dilation, RF=43) — proven baseline
-  Variant B: CORTEX-III v2 "Local-then-Global" (L0-2: k=8 dil=1, L3-5: k=7 dil=[2,4,8], RF=106)
-  Variant C: CORTEX-III v2 "Large Kernel" (k=15 everywhere, no dilation, RF=85)
+Architecture: Gated Conv (k=15, no dilation, RF=85 tokens)
+Training:     LR=3e-3, warmup=500, dropout=0.0, GA=1, wd=0.01
+Model:        d=256, 6L, d_ff=512, ~4.6M params
+Data:         TinyStories V2 ~580M tokens
+Time:         2 hours on 2 vCPU / 5GB RAM
 
-  10 min per variant = ~30 min total
+Experiment results that led here:
+  - Tested 10+ architectures: Gated Conv, Transformer, RWKV, CORTEX-II (MSAC),
+    CORTEX-III (staggered), Local-then-Global, Large Kernel
+  - Large Kernel (k=15) won: PPL 43.69 in 10 min, same speed as baseline
+  - Aggressive training (LR=3e-3, GA=1) beat conservative (LR=5e-4, GA=8) by 2.5x
+  - Position embeddings HURT (causal conv already encodes relative position)
+  - Multi-scale/dilation across layers: slight help (Local-then-Global: PPL 44.66)
+  - Dense wide kernel (k=15 everywhere) beat sparse dilation: PPL 43.69 vs 44.66
 
-Usage:  python v7/cortex3_v2_experiment.py --minutes 10
+Usage:  python v7/train_v71.py                # 2 hours (default)
+        python v7/train_v71.py --minutes 30   # 30 min test run
 """
 
 import os, sys, time, math, json, gc, argparse
@@ -32,21 +42,26 @@ os.environ['OMP_NUM_THREADS'] = '2'
 os.environ['MKL_NUM_THREADS'] = '2'
 
 # ============================================================================
-# CONFIG
+# CONFIG — all values from experiments
 # ============================================================================
 DATA_DIR = '/tmp/flashlm_v7'
+OUT_DIR = '/tmp/flashlm_v7/v71_out'
 VOCAB = 4096
 D_MODEL = 256
 N_LAYERS = 6
 D_FF = 512
+KERNEL_SIZE = 15       # Large Kernel winner (beats k=8 by 5.9% PPL)
 SEQ_LEN = 256
 BATCH_SIZE = 16
-GRAD_ACCUM = 1
-MAX_LR = 3e-3
+GRAD_ACCUM = 1         # GA=1 proven best (more steps > bigger batches)
+MAX_LR = 3e-3          # Aggressive training (10x v5.2's LR)
 MIN_LR = 1e-5
-WARMUP = 500
-WEIGHT_DECAY = 0.01
+WARMUP = 500           # ~10% of 2-hour training steps
+WEIGHT_DECAY = 0.01    # 0.1 was too aggressive for small models
 GRAD_CLIP = 1.0
+DROPOUT = 0.0          # Small models are capacity-limited, not overfitting
+LOG_EVERY = 50
+EVAL_EVERY = 500
 
 TRAIN_URL = ("https://huggingface.co/datasets/roneneldan/TinyStories/"
              "resolve/main/TinyStoriesV2-GPT4-train.txt")
@@ -75,6 +90,7 @@ class TokenDataset(Dataset):
 
 
 def prepare_data():
+    """Prepare tokenized TinyStories V2 data."""
     data_dir = Path(DATA_DIR)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -90,6 +106,7 @@ def prepare_data():
             print("  Downloading TinyStories V2 train (~2GB)...")
             import urllib.request
             urllib.request.urlretrieve(TRAIN_URL, str(train_txt))
+            print(f"    {train_txt.stat().st_size / 1e6:.1f} MB")
 
         if not val_txt.exists():
             print("  Downloading TinyStories V2 valid...")
@@ -108,6 +125,8 @@ def prepare_data():
             vocab_size=VOCAB, min_frequency=2,
             special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"]))
         tokenizer.save(str(tok_path))
+        actual_vocab = tokenizer.get_vocab_size()
+        print(f"    Actual vocab: {actual_vocab}")
 
         import shutil, tempfile
         print("  Tokenizing train set (streaming)...")
@@ -148,7 +167,7 @@ def prepare_data():
         print(f"    Valid: {n_val:,} tokens")
 
         with open(meta_path, 'w') as f:
-            json.dump({'vocab': tokenizer.get_vocab_size()}, f)
+            json.dump({'vocab': actual_vocab}, f)
     else:
         from tokenizers import Tokenizer
         tokenizer = Tokenizer.from_file(str(tok_path))
@@ -166,7 +185,7 @@ def prepare_data():
 
 
 # ============================================================================
-# SHARED COMPONENTS
+# MODEL
 # ============================================================================
 class RMSNorm(nn.Module):
     def __init__(self, dim):
@@ -177,12 +196,12 @@ class RMSNorm(nn.Module):
 
 
 class CausalDepthwiseConv(nn.Module):
-    """Causal depthwise conv1d with optional dilation."""
-    def __init__(self, d_model, kernel_size=8, dilation=1):
+    """Causal depthwise conv1d."""
+    def __init__(self, d_model, kernel_size=15):
         super().__init__()
-        self.pad = (kernel_size - 1) * dilation
+        self.pad = kernel_size - 1
         self.conv = nn.Conv1d(d_model, d_model, kernel_size,
-                              groups=d_model, padding=0, dilation=dilation, bias=False)
+                              groups=d_model, padding=0, bias=False)
         nn.init.kaiming_normal_(self.conv.weight, mode='fan_out')
 
     def forward(self, x):
@@ -193,53 +212,64 @@ class CausalDepthwiseConv(nn.Module):
 
 
 class GatedConvBlock(nn.Module):
-    """Gated conv mixer + SwiGLU FFN. Kernel size and dilation configurable per layer."""
-    def __init__(self, d_model, d_ff, kernel_size=8, dilation=1):
+    """Gated conv mixer + SwiGLU FFN."""
+    def __init__(self, d_model, d_ff, kernel_size=15, dropout=0.0):
         super().__init__()
+        # Mixer: up → split → sigmoid gate × conv → down
         self.ln1 = RMSNorm(d_model)
         self.mixer_up = nn.Linear(d_model, d_model * 2, bias=False)
-        self.conv = CausalDepthwiseConv(d_model, kernel_size, dilation)
+        self.conv = CausalDepthwiseConv(d_model, kernel_size)
         self.mixer_down = nn.Linear(d_model, d_model, bias=False)
+        self.mixer_drop = nn.Dropout(dropout)
+        # FFN: SwiGLU
         self.ln2 = RMSNorm(d_model)
         self.Wg = nn.Linear(d_model, d_ff, bias=False)
         self.Wu = nn.Linear(d_model, d_ff, bias=False)
         self.Wo = nn.Linear(d_ff, d_model, bias=False)
+        self.ffn_drop = nn.Dropout(dropout)
         for w in [self.mixer_up, self.mixer_down, self.Wg, self.Wu, self.Wo]:
             nn.init.kaiming_normal_(w.weight, mode='fan_out')
 
     def forward(self, x):
+        # Mixer
         h = self.ln1(x)
         gv = self.mixer_up(h)
         gate, val = gv.chunk(2, dim=-1)
         gate = torch.sigmoid(gate)
         conv_out = self.conv(val)
-        x = x + self.mixer_down(conv_out * gate)
+        x = x + self.mixer_drop(self.mixer_down(conv_out * gate))
+        # FFN
         h = self.ln2(x)
-        x = x + self.Wo(F.silu(self.Wg(h)) * self.Wu(h))
+        x = x + self.ffn_drop(self.Wo(F.silu(self.Wg(h)) * self.Wu(h)))
         return x
 
 
-class GatedConvModel(nn.Module):
-    """Generic Gated Conv model with per-layer kernel+dilation schedule."""
-    def __init__(self, vocab, d_model, n_layers, d_ff, kernels, dilations):
+class FlashLM_v71(nn.Module):
+    """FlashLM v7.1 CORTEX-III — Gated Conv with Large Kernel.
+
+    6 layers of gated depthwise causal conv (k=15) + SwiGLU FFN.
+    Receptive field: 1 + 14*6 = 85 tokens.
+    Weight tying between embedding and output head.
+    """
+    def __init__(self, vocab, d_model, n_layers, d_ff, seq_len,
+                 kernel_size=15, dropout=0.0):
         super().__init__()
-        assert len(kernels) == n_layers and len(dilations) == n_layers
+        self.seq_len = seq_len
         self.embed = nn.Embedding(vocab, d_model)
         self.ln_in = RMSNorm(d_model)
         self.blocks = nn.ModuleList([
-            GatedConvBlock(d_model, d_ff, kernel_size=kernels[i], dilation=dilations[i])
-            for i in range(n_layers)])
+            GatedConvBlock(d_model, d_ff, kernel_size, dropout)
+            for _ in range(n_layers)])
         self.ln_out = RMSNorm(d_model)
         self.head = nn.Linear(d_model, vocab, bias=False)
-        self.head.weight = self.embed.weight
+        self.head.weight = self.embed.weight  # weight tying
         nn.init.normal_(self.embed.weight, std=0.02)
 
-        # Compute receptive field
-        rf = 1
-        for i in range(n_layers):
-            rf += (kernels[i] - 1) * dilations[i]
+        # Receptive field
+        rf = 1 + (kernel_size - 1) * n_layers
         total_params = sum(p.numel() for p in self.parameters())
-        print(f"    RF: {rf} tokens | Kernels: {kernels} | Dilations: {dilations} | Params: {total_params:,}")
+        print(f"  Model: d={d_model}, L={n_layers}, k={kernel_size}, d_ff={d_ff}")
+        print(f"  RF: {rf} tokens | Params: {total_params:,} ({total_params/1e6:.2f}M)")
 
     def forward(self, x, targets=None):
         h = self.ln_in(self.embed(x))
@@ -256,7 +286,7 @@ class GatedConvModel(nn.Module):
     def generate(self, idx, max_new_tokens, temperature=0.8, top_k=40):
         self.eval()
         for _ in range(max_new_tokens):
-            ctx = idx[:, -SEQ_LEN:]
+            ctx = idx[:, -self.seq_len:]
             logits = self(ctx)[:, -1, :] / max(temperature, 1e-5)
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -266,6 +296,9 @@ class GatedConvModel(nn.Module):
         return idx
 
 
+# ============================================================================
+# TRAINING
+# ============================================================================
 def get_lr(step, warmup, max_lr, min_lr, total_steps):
     if step < warmup:
         return max_lr * (step + 1) / warmup
@@ -274,7 +307,7 @@ def get_lr(step, warmup, max_lr, min_lr, total_steps):
 
 
 @torch.no_grad()
-def evaluate(model, val_data, max_batches=30):
+def evaluate(model, val_data, max_batches=50):
     model.eval()
     losses = []
     n = (len(val_data) - 1) // SEQ_LEN
@@ -290,21 +323,18 @@ def evaluate(model, val_data, max_batches=30):
         x = torch.tensor(np.stack(bx), dtype=torch.long)
         y = torch.tensor(np.stack(by), dtype=torch.long)
         loss = model(x, targets=y)
-        losses.append(loss.item())
+        if not torch.isnan(loss):
+            losses.append(loss.item())
     model.train()
-    return sum(losses) / len(losses)
+    return sum(losses) / max(len(losses), 1)
 
 
-# ============================================================================
-# TRAINING LOOP
-# ============================================================================
-def run_experiment(name, model, train_ds, val_data, tokenizer, minutes):
-    print(f"\n{'=' * 60}")
-    print(f"  {name}")
-    print(f"{'=' * 60}")
+def train(tokenizer, vocab, train_ds, val_data, minutes):
+    out_dir = Path(OUT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"  Params: {total_params:,} ({total_params / 1e6:.2f}M)")
+    model = FlashLM_v71(vocab, D_MODEL, N_LAYERS, D_FF, SEQ_LEN,
+                         KERNEL_SIZE, DROPOUT)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=MAX_LR,
                                   betas=(0.9, 0.95), weight_decay=WEIGHT_DECAY)
@@ -312,7 +342,7 @@ def run_experiment(name, model, train_ds, val_data, tokenizer, minutes):
                           num_workers=0, drop_last=True, pin_memory=False)
 
     toks_per_step = BATCH_SIZE * SEQ_LEN * GRAD_ACCUM
-    est_speed = 1500
+    est_speed = 3000
     total_steps = int(minutes * 60 * est_speed / toks_per_step)
 
     step, tokens_seen, best_val = 0, 0, float('inf')
@@ -320,6 +350,11 @@ def run_experiment(name, model, train_ds, val_data, tokenizer, minutes):
     model.train()
     train_iter = iter(train_dl)
     t_start = time.time()
+
+    print(f"\n  Training for {minutes:.0f} min (~{total_steps:,} steps, ~{total_steps * toks_per_step / 1e6:.0f}M tokens)")
+    print(f"  Target: beat v5.2 PPL 10.56")
+    print(f"  {'Step':>7} {'Loss':>8} {'PPL':>9} {'LR':>9} {'Tok/s':>8} {'Tokens':>9} {'ETA':>6} {'Val PPL':>9}")
+    print(f"  {'-' * 70}")
 
     while True:
         elapsed = time.time() - t_start
@@ -335,16 +370,8 @@ def run_experiment(name, model, train_ds, val_data, tokenizer, minutes):
                 x, y = next(train_iter)
             loss = model(x, targets=y)
             if torch.isnan(loss) or torch.isinf(loss):
-                print(f"  NaN/Inf loss at step {step} — aborting")
-                final_val = evaluate(model, val_data, max_batches=50) if step > 0 else float('inf')
-                final_ppl = math.exp(min(final_val, 20))
-                elapsed = time.time() - t_start
-                if final_val < best_val:
-                    best_val = final_val
-                return {'name': name, 'params': total_params, 'final_loss': final_val,
-                        'final_ppl': final_ppl, 'best_loss': best_val,
-                        'best_ppl': math.exp(min(best_val, 20)),
-                        'tokens': tokens_seen, 'steps': step, 'time_min': elapsed / 60}
+                print(f"  NaN/Inf at step {step} — skipping batch")
+                continue
             (loss / GRAD_ACCUM).backward()
             log_loss += loss.item()
             log_n += 1
@@ -357,158 +384,157 @@ def run_experiment(name, model, train_ds, val_data, tokenizer, minutes):
         optimizer.step()
         step += 1
 
-        if step % 50 == 0:
+        # Logging
+        if step % LOG_EVERY == 0:
             avg = log_loss / max(log_n, 1)
             elapsed = time.time() - t_start
             tps = tokens_seen / max(elapsed, 1)
             ppl = math.exp(min(avg, 20))
             remaining = max(minutes * 60 - elapsed, 0) / 60
-            print(f"  Step {step:5d} | Loss {avg:.4f} | PPL {ppl:7.2f} | "
-                  f"LR {lr:.1e} | {tps:,.0f} tok/s | "
-                  f"{tokens_seen / 1e6:.1f}M tok | ETA {remaining:.1f}m")
+            print(f"  {step:>7d} {avg:>8.4f} {ppl:>9.2f} {lr:>9.1e} {tps:>8,.0f} {tokens_seen/1e6:>8.1f}M {remaining:>5.1f}m")
             log_loss, log_n = 0.0, 0
 
-        if step % 200 == 0:
+        # Validation
+        if step % EVAL_EVERY == 0:
             val = evaluate(model, val_data)
-            ppl = math.exp(min(val, 20))
+            val_ppl = math.exp(min(val, 20))
             tag = ''
             if val < best_val:
                 best_val = val
+                # Save best checkpoint
+                torch.save({
+                    'step': step,
+                    'model_state': model.state_dict(),
+                    'optimizer_state': optimizer.state_dict(),
+                    'val_loss': val,
+                    'val_ppl': val_ppl,
+                    'tokens': tokens_seen,
+                }, out_dir / 'best.pt')
                 tag = ' *'
-            print(f"  >>> VAL loss={val:.4f} PPL={ppl:.2f}{tag}")
+            print(f"  {'':>7} {'':>8} {'':>9} {'':>9} {'':>8} {'':>9} {'':>6} {val_ppl:>8.2f}{tag}")
 
-        if step % 100 == 0:
+        # Periodic checkpoint
+        if step % 2000 == 0:
+            torch.save({
+                'step': step,
+                'model_state': model.state_dict(),
+                'tokens': tokens_seen,
+            }, out_dir / f'checkpoint_{step}.pt')
+
+        if step % 200 == 0:
             gc.collect()
 
-    # Final eval
-    final_val = evaluate(model, val_data, max_batches=50)
+    # ========================================================================
+    # FINAL
+    # ========================================================================
+    final_val = evaluate(model, val_data, max_batches=100)
     if final_val < best_val:
         best_val = final_val
+        torch.save({
+            'step': step,
+            'model_state': model.state_dict(),
+            'val_loss': final_val,
+            'val_ppl': math.exp(min(final_val, 20)),
+            'tokens': tokens_seen,
+        }, out_dir / 'best.pt')
+
     final_ppl = math.exp(min(final_val, 20))
     best_ppl = math.exp(min(best_val, 20))
     elapsed = time.time() - t_start
 
-    # Generation
+    # Generation samples
     model.eval()
-    print(f"\n  Sample:")
-    ids = torch.tensor([tokenizer.encode("Once upon a time").ids], dtype=torch.long)
-    out = model.generate(ids, max_new_tokens=60, temperature=0.8, top_k=40)
-    print(f"  > {tokenizer.decode(out[0].tolist())[:150]}")
-    model.train()
+    prompts = ["Once upon a time", "The little girl", "One day a cat"]
+    print(f"\n  {'=' * 60}")
+    print(f"  GENERATION SAMPLES")
+    print(f"  {'=' * 60}")
+    for prompt in prompts:
+        ids = torch.tensor([tokenizer.encode(prompt).ids], dtype=torch.long)
+        out = model.generate(ids, max_new_tokens=80, temperature=0.8, top_k=40)
+        text = tokenizer.decode(out[0].tolist())
+        print(f"  Prompt: {prompt}")
+        print(f"  > {text[:200]}")
+        print()
 
-    print(f"\n  Final: loss={final_val:.4f} PPL={final_ppl:.2f} | "
-          f"Best PPL={best_ppl:.2f} | {tokens_seen / 1e6:.1f}M tok in {elapsed / 60:.1f}m")
+    # Final summary
+    print(f"  {'=' * 60}")
+    print(f"  FINAL RESULTS")
+    print(f"  {'=' * 60}")
+    print(f"  Steps: {step:,} | Tokens: {tokens_seen/1e6:.1f}M | Time: {elapsed/60:.1f}m")
+    print(f"  Final PPL: {final_ppl:.2f} | Best PPL: {best_ppl:.2f}")
+    print(f"  v5.2 target: PPL 10.56")
+    if best_ppl < 10.56:
+        print(f"  *** BEAT v5.2 by {10.56/best_ppl:.2f}x ***")
+    else:
+        print(f"  Gap to v5.2: {best_ppl/10.56:.2f}x")
+    tps = tokens_seen / max(elapsed, 1)
+    print(f"  Speed: {tps:,.0f} tok/s")
 
-    return {
-        'name': name,
-        'params': total_params,
-        'final_loss': final_val,
+    # Save final model
+    torch.save({
+        'step': step,
+        'model_state': model.state_dict(),
+        'config': {
+            'vocab': vocab, 'd_model': D_MODEL, 'n_layers': N_LAYERS,
+            'd_ff': D_FF, 'kernel_size': KERNEL_SIZE, 'seq_len': SEQ_LEN,
+            'dropout': DROPOUT,
+        },
+        'results': {
+            'final_ppl': final_ppl, 'best_ppl': best_ppl,
+            'tokens': tokens_seen, 'steps': step,
+            'time_min': elapsed / 60, 'tok_per_sec': tps,
+        },
+    }, out_dir / 'final.pt')
+
+    # Save results JSON
+    results = {
+        'model': 'FlashLM v7.1 CORTEX-III',
+        'architecture': 'Gated Conv k=15, no dilation, RF=85',
+        'params': sum(p.numel() for p in model.parameters()),
         'final_ppl': final_ppl,
-        'best_loss': best_val,
         'best_ppl': best_ppl,
         'tokens': tokens_seen,
         'steps': step,
         'time_min': elapsed / 60,
+        'tok_per_sec': tps,
+        'config': {
+            'd_model': D_MODEL, 'n_layers': N_LAYERS, 'd_ff': D_FF,
+            'kernel_size': KERNEL_SIZE, 'seq_len': SEQ_LEN,
+            'lr': MAX_LR, 'warmup': WARMUP, 'weight_decay': WEIGHT_DECAY,
+            'batch_size': BATCH_SIZE, 'grad_accum': GRAD_ACCUM, 'dropout': DROPOUT,
+        }
     }
+    json.dump(results, open(out_dir / 'results.json', 'w'), indent=2)
+    print(f"\n  Saved to {out_dir}/")
+    print(f"    best.pt    — best val checkpoint")
+    print(f"    final.pt   — final model + config")
+    print(f"    results.json — training results")
+    model.train()
+
+    return results
 
 
 # ============================================================================
 # MAIN
 # ============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="FlashLM v7.1 CORTEX-III v2 Experiment")
-    parser.add_argument('--minutes', type=float, default=10, help='Minutes per variant')
+    parser = argparse.ArgumentParser(description="FlashLM v7.1 CORTEX-III Training")
+    parser.add_argument('--minutes', type=float, default=120, help='Training time in minutes')
     args = parser.parse_args()
 
     print(f"\n{'=' * 60}")
-    print(f"  CORTEX-III v2: Local-then-Global & Large Kernel")
+    print(f"  FlashLM v7.1 CORTEX-III")
     print(f"{'=' * 60}")
-    print(f"  {args.minutes} min per variant | 3 variants | ~{args.minutes * 3:.0f} min total")
+    print(f"  Gated Conv k=15 | d={D_MODEL} | {N_LAYERS}L | d_ff={D_FF}")
     print(f"  LR={MAX_LR:.0e} warmup={WARMUP} wd={WEIGHT_DECAY} batch={BATCH_SIZE}")
+    print(f"  Training: {args.minutes:.0f} min")
+    print(f"  Target: beat v5.2 PPL 10.56")
 
-    print("\n--- Data ---")
+    print(f"\n--- Data ---")
     tokenizer, vocab, train_ds, val_data = prepare_data()
 
-    results = []
-
-    # ========================================================================
-    # Variant A: Gated Conv baseline (k=8, no dilation, RF=43)
-    # ========================================================================
-    print(f"\n{'#' * 60}")
-    print(f"  Variant A: Gated Conv (k=8, no dilation, RF=43)")
-    print(f"{'#' * 60}")
-    model_a = GatedConvModel(vocab, D_MODEL, N_LAYERS, D_FF,
-                              kernels=[8, 8, 8, 8, 8, 8],
-                              dilations=[1, 1, 1, 1, 1, 1])
-    r_a = run_experiment("Gated Conv (k=8, RF=43)", model_a, train_ds, val_data, tokenizer, args.minutes)
-    results.append(r_a)
-    del model_a; gc.collect()
-
-    # ========================================================================
-    # Variant B: CORTEX-III v2 "Local-then-Global"
-    #   L0-2: k=8, dil=1 (identical to GC — proven early features)
-    #   L3-5: k=7, dil=[2,4,8] (moderate dilation — broader but still dense)
-    #   RF = 1 + 7+7+7 + 12+24+48 = 106 tokens
-    # ========================================================================
-    print(f"\n{'#' * 60}")
-    print(f"  Variant B: CORTEX-III v2 'Local-then-Global' (RF=106)")
-    print(f"  L0-2: k=8 dil=1 | L3-5: k=7 dil=[2,4,8]")
-    print(f"{'#' * 60}")
-    model_b = GatedConvModel(vocab, D_MODEL, N_LAYERS, D_FF,
-                              kernels=[8, 8, 8, 7, 7, 7],
-                              dilations=[1, 1, 1, 2, 4, 8])
-    r_b = run_experiment("C-III v2 Local-Global (RF=106)", model_b, train_ds, val_data, tokenizer, args.minutes)
-    results.append(r_b)
-    del model_b; gc.collect()
-
-    # ========================================================================
-    # Variant C: CORTEX-III v2 "Large Kernel"
-    #   All layers: k=15, dil=1 (wider dense conv everywhere)
-    #   RF = 1 + 14*6 = 85 tokens
-    # ========================================================================
-    print(f"\n{'#' * 60}")
-    print(f"  Variant C: CORTEX-III v2 'Large Kernel' (RF=85)")
-    print(f"  All layers: k=15, dil=1")
-    print(f"{'#' * 60}")
-    model_c = GatedConvModel(vocab, D_MODEL, N_LAYERS, D_FF,
-                              kernels=[15, 15, 15, 15, 15, 15],
-                              dilations=[1, 1, 1, 1, 1, 1])
-    r_c = run_experiment("C-III v2 Large Kernel (RF=85)", model_c, train_ds, val_data, tokenizer, args.minutes)
-    results.append(r_c)
-    del model_c; gc.collect()
-
-    # ========================================================================
-    # RESULTS
-    # ========================================================================
-    print(f"\n\n{'=' * 85}")
-    print(f"  RESULTS COMPARISON")
-    print(f"{'=' * 85}")
-    print(f"  {'Variant':<40} {'Params':>8} {'Best PPL':>10} {'Final PPL':>10} {'Tok/s':>8}")
-    print(f"  {'-' * 86}")
-    for r in results:
-        tps = r['tokens'] / max(r['time_min'] * 60, 1)
-        print(f"  {r['name']:<40} {r['params']:>8,} {r['best_ppl']:>10.2f} {r['final_ppl']:>10.2f} {tps:>8,.0f}")
-    print(f"{'=' * 85}")
-
-    winner = min(results, key=lambda r: r['best_ppl'])
-    print(f"\n  Winner: {winner['name']} (Best PPL: {winner['best_ppl']:.2f})")
-
-    gc_result = results[0]
-    for r in results[1:]:
-        gc_tps = gc_result['tokens'] / max(gc_result['time_min'] * 60, 1)
-        r_tps = r['tokens'] / max(r['time_min'] * 60, 1)
-        ratio = r['best_ppl'] / gc_result['best_ppl']
-        speed = r_tps / gc_tps
-        if r['best_ppl'] < gc_result['best_ppl']:
-            print(f"  {r['name']}: BETTER (PPL {ratio:.2f}x, speed {speed:.2f}x)")
-        else:
-            print(f"  {r['name']}: worse (PPL {ratio:.2f}x, speed {speed:.2f}x)")
-
-    # Save
-    out_dir = Path('/tmp/flashlm_v7/exp_out')
-    out_dir.mkdir(parents=True, exist_ok=True)
-    json.dump(results, open(out_dir / 'cortex3_v2_results.json', 'w'), indent=2)
-    print(f"\n  Saved to {out_dir}/cortex3_v2_results.json\n")
+    print(f"\n--- Model ---")
+    results = train(tokenizer, vocab, train_ds, val_data, args.minutes)
 
 
 if __name__ == '__main__':

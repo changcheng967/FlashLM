@@ -8,13 +8,14 @@
 
 FlashLM is a series of small language models trained on constrained hardware (2 vCPU, 5GB RAM, 2-hour time limit). The core identity is **ternary weights via the Straight-Through Estimator** — weights are quantized to {-1, 0, +1} during every forward pass, not post-training.
 
-### Current: v7.1 CORTEX-II
+### Current: v7.1 CORTEX-III
 
-v7.1 CORTEX-II is the next generation, informed by foundational research on small language model training. It compares 5 architectures head-to-head to find the optimal approach at ~7M parameters:
+v7.1 CORTEX-III uses a **Gated Conv with Large Kernel** (k=15), found through systematic architecture experiments testing 10+ variants at ~4.6M parameters:
 
-- **Architecture experiments**: Transformer, RWKV, Gated Conv (v4 "Bolt" style), CORTEX-Lite (novel), RWKV+Adaptive
-- **Research-backed hyperparameters**: LR=3e-3, warmup=500, weight_decay=0.01 (v7 used 5e-4, 100, 0.1 — all wrong)
+- **Architecture**: Gated Conv (k=15, no dilation, RF=85 tokens) — beats v4's k=8 by 5.9% PPL at same speed
+- **Training**: LR=3e-3, warmup=500, weight_decay=0.01, dropout=0.0 (aggressive training beats conservative by 2.5x)
 - **Full TinyStories V2 dataset**: ~580M tokens (train+valid)
+- **No position embeddings** — causal depthwise conv already encodes relative position; learned position embeddings made PPL worse
 
 ### v7 CORTEX — Failed (documented below)
 
@@ -29,42 +30,32 @@ The v7 experiment phase also tested 6 internal approaches. Only one worked (adap
 
 ---
 
-## Experiment History
+## Architecture Experiment Results (v7.1)
 
-The v7 experiment phase tested 6 approaches. Only one worked.
+10+ architectures tested head-to-head, 10 min each, same training config:
 
-| # | Approach | Result |
-|---|----------|--------|
-| 1 | Learned MLP gate + fixed threshold | Gate collapse: 0.1% early exit, 0.96× speedup |
-| 2 | Entropy-based exit + consistency loss | 2.72× speedup but all tokens exit at layer 2 (no discrimination) |
-| 3 | Progressive thresholds + diversity loss | **1.90× speedup, better PPL (5.34 vs 5.39), token discrimination** |
-| 4 | Predictive coding (skip channel-mix) | 13.3% skip, 0.93× speedup — overhead > savings |
-| 5 | Sparse representations (top-k masking) | Degrades quality AND speed at all sparsity levels |
-| 6 | Concept-space bottleneck | PPL 10.33 vs 5.39 baseline, 30× slower inference |
+| Architecture | PPL | Speed | RF | Notes |
+|---|---|---|---|---|
+| **Gated Conv k=15** | **43.69** | **3,436 tok/s** | **85** | **Winner — 5.9% better than baseline** |
+| Gated Conv k=8 (v4) | 46.44 | 3,414 tok/s | 43 | Baseline |
+| Local-then-Global | 44.66 | 3,360 tok/s | 106 | k=8 early + k=7 dilated late |
+| Large Kernel k=15 + PosEmb | 47.52 | 3,353 tok/s | 106 | Position embeddings HURT |
+| Transformer (RoPE+Attention) | ~76 | ~3,000 tok/s | 256 | O(n²) too slow on CPU |
+| CORTEX-II (MSAC, 3 parallel) | 55.21 | 2,866 tok/s | 307 | 3 convs/layer too slow |
+| CORTEX-III (staggered+exp dil) | 58.11 | 3,316 tok/s | 307 | k=3 at layer 0 too narrow |
+| RWKV | 84-88 | ~3,000 tok/s | ∞ | Doesn't work below 100M params |
 
-### What We Learned
+### Key Findings
 
-- **Adaptive depth works.** Entropy-gated early exit with progressive thresholds gives real speedup AND better quality. The model learns which tokens are easy vs hard.
-- **Predictive coding doesn't help at this scale.** A linear predictor can approximate layer-0 channel-mix (72% accuracy) but fails at deeper layers where representations are complex. The predictor overhead (495K extra params) outweighs the 13.3% channel-mix savings.
-- **Sparse representations hurt.** Top-k masking on dense tensors adds computational overhead (topk + scatter + mask multiply) without any quality or speed benefit. Even at 100% density (keeping all activations), the overhead makes it slower than baseline. CPU PyTorch has no efficient sparse kernels for this pattern.
-- **Concept bottlenecks destroy information.** The hypothesis was "predicting concepts is easier than predicting tokens." At d_model=256, the hidden states are already compressed representations. Adding another bottleneck (256→128→98) just loses information. The result was 1.9× worse PPL and 30× slower inference.
-- **RWKV doesn't scale down.** Linear attention via cumsum requires enough state capacity to compress history. At 7M params, the state is too small. v4's gated causal depthwise conv (4.3M params) achieved val loss 2.84 at step 500 — RWKV at 7M couldn't reach 6.0 after 1200 steps.
+- **Dense wide kernel beats sparse dilation.** k=15 everywhere (RF=85) beats k=[3,5,7] with exponential dilation (RF=307). Language needs every word, not scattered samples.
+- **Speed = quality at fixed compute.** More tokens processed per second means more learning. The fastest architecture (Gated Conv) consistently won.
+- **Position embeddings hurt.** Causal depthwise conv already encodes relative position through its sliding window. Adding absolute position embeddings adds noise.
+- **Aggressive training dominates.** LR=3e-3, GA=1, no dropout (PPL 52.69) crushed LR=5e-4, GA=8, dropout=0.1 (PPL 132.44). 9.5x more optimizer updates per minute matters more than gradient quality at short time scales.
+- **RWKV doesn't scale down.** Linear attention's fixed-capacity state is too small at 7M params. v4's gated conv (4.3M params) reached val loss 2.84 at step 500 — RWKV couldn't reach 6.0 after 1200 steps.
 
-Full experiment reports: `v7/experiment4_results.md`, `v7/experiment5_results.md`, `v7/experiment6_results.md`
+### v7 Internal Experiments (RWKV, pre-v7.1)
 
----
-
-## Adaptive Depth Results (Exp 3 — the win)
-
-| Metric | Fixed 6-Layer | Fixed 2-Layer | Adaptive-Depth |
-|--------|--------------|---------------|----------------|
-| Parameters | 3,969,024 | 1,446,210 | 4,095,363 |
-| Perplexity | 5.39 | 5.76 | **5.34** |
-| Inference speed | 63.6 tok/s | 190.1 tok/s | **120.7 tok/s** |
-| Speedup vs 6L | 1.0× | 2.99× | **1.90×** |
-| Exit distribution | all at layer 6 | all at layer 2 | **56.8% at layer 2, 43.2% at layer 4** |
-
-The adaptive model is better than both the 2-layer AND 6-layer model. Easy tokens (common words, punctuation) exit at layer 2. Hard tokens (rare words, complex grammar) use deeper layers.
+6 approaches tested with RWKV. Only adaptive depth (Exp 3) worked. These used RWKV which was later found to not work at this scale. Full reports: `v7/experiment[1-6]_results.md`
 
 ---
 
@@ -72,7 +63,7 @@ The adaptive model is better than both the 2-layer AND 6-layer model. Easy token
 
 | Model | Architecture | Params | Hardware | Train Time | Data | PPL | BPC | Status |
 |---|---|---|---|---|---|---|---|---|
-| **v7.1 CORTEX-II** | Architecture experiments (5 candidates) | ~7M | 2 vCPU / 5 GB | TBD | TinyStories V2 ~580M tok | TBD | TBD | In progress |
+| **v7.1 CORTEX-III** | Gated Conv k=15 (large kernel) | ~4.6M | 2 vCPU / 5 GB | 2h | TinyStories V2 ~580M tok | TBD | TBD | Training |
 | **v7 CORTEX** | RWKV + adaptive depth + ternary | ~8M | 2 vCPU / 5 GB | 2h | TinyStories V2 20M+ tok | 377.66 | — | **Failed** |
 | **v5.2 "Nova-Ignition"** | Transformer (RoPE + Attention) | 5.0M | 2 vCPU / 5 GB | 2h | TinyStories 20M tok | 10.56 | 0.78 | Complete |
 | **v5 "Thunderbolt"** | ParallelGatedRecurrence | 29.7M | Ryzen 7950X3D | 40h | Full TinyStories | **1.36** | **0.44** | Complete |
@@ -97,7 +88,7 @@ v6 "SUPERNOVA"         4.1M params    PPL 14.0    3h on 2 vCPU       (ternary, d
   ↓
 v7 CORTEX              ~8M params     PPL 377.66  2h on 2 vCPU       (RWKV + ternary — FAILED)
   ↓
-v7.1 CORTEX-II         ~7M params     TBD         2h on 2 vCPU       (architecture experiments in progress)
+v7.1 CORTEX-III        ~4.6M params   TBD         2h on 2 vCPU       (Gated Conv k=15, training pending)
 ```
 
 ---
@@ -143,9 +134,9 @@ FlashLM/
 ├── README.md
 ├── LICENSE
 ├── v7/
+│   ├── train_v71.py                      ← v7.1 CORTEX-III training
 │   ├── train.py                           ← v7 CORTEX training (failed)
-│   ├── experiments.py                     ← v7.1 CORTEX-II architecture experiments
-│   └── experiment[1-6]_results.md         ← Experiment reports
+│   └── experiment[1-6]_results.md         ← Internal experiment reports
 └── archive/
     ├── eval_bpc.py                        ← BPC evaluation
     ├── train_v4.py                        ← v4 Bolt
