@@ -299,7 +299,7 @@ class HebbianConvBlock(nn.Module):
         for w in [self.key_proj, self.val_proj, self.query_proj]:
             nn.init.kaiming_normal_(w.weight, mode='fan_out')
         # Output projection: small init so Hebbian context starts gentle
-        nn.init.normal_(self.mem_out.weight, std=0.02)
+        nn.init.normal_(self.mem_out.weight, std=0.01)
 
     def forward(self, x):
         B, T, D = x.shape
@@ -323,11 +323,13 @@ class HebbianConvBlock(nn.Module):
         scores = torch.bmm(vals, queries.transpose(1, 2))  # (B, T, T)
         scores = scores / math.sqrt(self.d_mem)  # scale for stability
 
-        # Apply causal mask + exponential decay (precomputed)
-        weighted = scores * self.decay_mask.unsqueeze(0)  # (B, T, T)
+        # Apply causal mask + exponential decay (slice to actual T)
+        mask = self.decay_mask[:T, :T].unsqueeze(0)  # (1, T, T)
+        weighted = scores * mask  # (B, T, T)
 
         # Read: weighted sum of keys → retrieves associated information
-        reads = torch.bmm(weighted.transpose(1, 2), keys)  # (B, T, d_mem)
+        # Scale by 1/sqrt(T) so output magnitude is O(1), not O(T)
+        reads = torch.bmm(weighted.transpose(1, 2), keys) / math.sqrt(T)  # (B, T, d_mem)
 
         # Project back and add as residual
         mem_ctx = self.mem_out(reads)  # (B, T, D)
