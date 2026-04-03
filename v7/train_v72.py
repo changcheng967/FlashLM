@@ -235,10 +235,11 @@ class HebbianConvBlock(nn.Module):
         self.query_proj = nn.Linear(d_model, d_mem, bias=False)
         self.mem_out = nn.Linear(d_mem, d_model, bias=False)
 
-        # Precompute causal decay mask
+        # Precompute causal decay mask — upper triangular so position j
+        # only sees past positions i <= j (no future leakage!)
         t = torch.arange(seq_len)
-        t_diff = t.unsqueeze(1) - t.unsqueeze(0)
-        causal = torch.tril(torch.ones(seq_len, seq_len))
+        t_diff = t.unsqueeze(0) - t.unsqueeze(1)   # t_diff[i,j] = j - i
+        causal = torch.triu(torch.ones(seq_len, seq_len))  # i <= j
         decay_mask = causal * (decay ** t_diff.float())
         self.register_buffer('decay_mask', decay_mask)
 
