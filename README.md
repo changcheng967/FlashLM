@@ -217,7 +217,7 @@ FlashLM/
 ```bibtex
 @misc{flashlm,
   author = {Cheng Chang},
-  title = {FlashLM: Small Language Models with Hebbian Associative Memory},
+  title = {FlashLM: Language Models Trained from Scratch on Free-Tier Hardware},
   year = {2026},
   url = {https://github.com/changcheng967/FlashLM}
 }
