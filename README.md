@@ -217,7 +217,7 @@ FlashLM/
 ```bibtex
 @misc{flashlm,
   author = {Cheng Chang},
-  title = {FlashLM: Language Models Trained from Scratch on Free-Tier Hardware},
+  title = {FlashLM: CPU-Native Ternary Language Models},
   year = {2026},
   url = {https://github.com/changcheng967/FlashLM}
 }
