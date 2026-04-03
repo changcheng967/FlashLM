@@ -2,7 +2,7 @@
 
 # FlashLM
 
-**CPU-Native Language Models — CORTEX Architecture**
+**CPU-Native Ternary Language Models**
 
 No GPUs · No pretraining · Trained from scratch on free-tier CPUs
 
