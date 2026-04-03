@@ -12,14 +12,14 @@ Architecture: CORTEX-VI (Gated Conv + Hebbian Associative Memory)
   - Computed in parallel (no sequential loop), ~13% overhead.
 
 Results that led here:
-  - 7-min experiment: PPL 15.58 vs baseline PPL 52.52 (3.37x improvement!)
   - v7.1 Gated Conv alone: PPL 18.16 in 2 hours
   - Target: beat v5.2 PPL 10.56
+  - NOTE: earlier 7-min experiment used a non-causal mask bug (fixed)
 
 Training: LR=3e-3, warmup=500, dropout=0.0, GA=1, wd=0.01
 
-Usage:  python v7/train_v71_hebbian.py                # 2 hours (default)
-        python v7/train_v71_hebbian.py --minutes 30   # 30 min test run
+Usage:  python v7/train_v72.py                # 2 hours (default)
+        python v7/train_v72.py --minutes 30   # 30 min test run
 """
 
 import os, sys, time, math, json, gc, argparse
