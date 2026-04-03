@@ -2,9 +2,9 @@
 
 # FlashLM
 
-**Small language models trained from scratch on free-tier hardware.**
+**CPU-Native Ternary Language Models**
 
-No GPUs · No pretraining · Just CPUs and 2 hours
+No GPUs · No pretraining · Trained from scratch on free-tier CPUs
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
