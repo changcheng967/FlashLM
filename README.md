@@ -1,15 +1,23 @@
+<div align="center">
+
 # FlashLM
 
-**Small language models trained from scratch on free-tier hardware.** No GPUs, no pretraining — just CPUs and 2 hours.
+**Small language models trained from scratch on free-tier hardware.**
+
+No GPUs · No pretraining · Just CPUs and 2 hours
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+</div>
 
 ---
 
 ## Model Lineup
 
 | Version | Name | Architecture | Params | Hardware | Time | PPL | Status |
-|---|---|---|---|---|---|---|---|
+|:-------:|------|-------------|-------:|----------|-----:|----:|--------|
 | v4 | Bolt | GatedRecurrence (ternary) | 4.3M | 2 vCPU / 5GB | 2h | 15.05 | Archived |
-| v5 | Thunderbolt | ParallelGatedRecurrence (ternary) | 29.7M | Ryzen 7950X3D | 40h | 1.36 | Complete |
+| v5 | Thunderbolt | ParallelGatedRecurrence (ternary) | 29.7M | Ryzen 7950X3D | 40h | **1.36** | Complete |
 | v5.2 | Nova-Ignition | Transformer (Attention) | 5.0M | 2 vCPU / 5GB | 2h | 10.56 | Complete |
 | v6 | SUPERNOVA | Linear mixer + GLU (ternary) | 4.1M | 2 vCPU / 5GB | 3h | 14.0 | Data bug |
 | v7 | CORTEX | RWKV + ternary | ~8M | 2 vCPU / 5GB | 2h | 377.66 | Failed |
@@ -19,141 +27,132 @@
 ### Evolution
 
 ```
-v4  "Bolt"               4.3M   PPL 15.05    2h   2 vCPU       ternary recurrence
+v4  "Bolt"              4.3M    PPL 15.05    2h  · 2 vCPU       · ternary recurrence
  ↓
-v5  "Thunderbolt"       29.7M   PPL  1.36   40h   Ryzen        ternary recurrence
+v5  "Thunderbolt"      29.7M    PPL  1.36   40h  · Ryzen 7950X3D · ternary recurrence
  ↓
-v5.2 "Nova-Ignition"    5.0M   PPL 10.56    2h   2 vCPU       float32 attention
+v5.2 "Nova-Ignition"   5.0M    PPL 10.56    2h  · 2 vCPU       · float32 attention
  ↓
-v6  "SUPERNOVA"          4.1M   PPL 14.0     3h   2 vCPU       ternary, data bug
+v6  "SUPERNOVA"         4.1M    PPL 14.0     3h  · 2 vCPU       · ternary, data bug
  ↓
-v7  CORTEX               ~8M   PPL 377.66   2h   2 vCPU       RWKV + ternary — failed
+v7  CORTEX              ~8M    PPL 377.66   2h  · 2 vCPU       · RWKV + ternary — failed
  ↓
-v7.1 CORTEX-III          4.6M  PPL 18.16    2h   2 vCPU       gated conv k=15
+v7.1 CORTEX-III         4.6M   PPL 18.16    2h  · 2 vCPU       · gated conv k=15
  ↓
-v7.2 CORTEX-VI           5.0M  Training...  2h   2 vCPU       gated conv + Hebbian memory
+v7.2 CORTEX-VI          5.0M   Training...  2h  · 2 vCPU       · gated conv + Hebbian memory
 ```
 
 ---
 
 ## Current: v7.2 CORTEX-VI
 
-v7.2 adds **Hebbian Associative Memory** alongside Gated Convolution — giving the model both local and global context for the first time.
+### The Problem
 
-### The problem it solves
+v7.1's Gated Conv has a **receptive field of 85 tokens**. Beyond that — zero information about earlier content. A character introduced 100 tokens ago is completely invisible. This is why v7.1 (PPL 18.16) lost to v5.2's attention (PPL 10.56): attention sees everything, conv sees only the last 85 tokens.
 
-v7.1's Gated Conv has a receptive field of 85 tokens. Beyond that, the model has **zero** information about earlier content. A character introduced 100 tokens ago is invisible. This is why v7.1 (PPL 18.16) couldn't match v5.2's attention-based PPL 10.56 — attention sees everything, conv sees only the last 85 tokens.
+### The Solution: Hebbian Associative Memory
 
-### How Hebbian Memory works
+Each layer maintains a **64×64 correlation matrix** that stores pairwise feature co-occurrences from the entire sequence. It sits alongside Gated Convolution, giving the model both local and global context:
 
-Each layer maintains a 64×64 correlation matrix that stores pairwise feature co-occurrences from the entire sequence:
+| Component | Scope | What it captures |
+|-----------|-------|-----------------|
+| Gated Conv k=15 | Local — 85 tokens | Grammar, word choice, phrase structure |
+| Hebbian Memory d_mem=64 | Global — full sequence | Characters, plot, setting, long-range dependencies |
 
-| Component | Scope | Mechanism |
-|---|---|---|
-| **Gated Conv k=15** | Local (85 tokens) | Causal depthwise convolution — grammar, word choice |
-| **Hebbian Memory** | Global (full sequence) | 64×64 correlation matrix — characters, plot, setting |
+**At each position:**
+- **Write**: `M_t = decay × M_{t-1} + key_t ⊗ value_t` — outer product update
+- **Read**: `r_t = M_t × query_t` — content-addressable retrieval
+- Computed **fully in parallel** via batched matrix multiply — only ~13% overhead
 
-At each position:
-- **Write**: `M_t = decay × M_{t-1} + key_t ⊗ value_t` (outer product update)
-- **Read**: `r_t = M_t × query_t` (content-addressable retrieval)
-- Computed **in parallel** via batched matrix multiplication — no sequential loop, only ~13% overhead
+**The Goldilocks zone of memory:**
 
-This is the "Goldilocks zone" of memory capacity:
-- **RWKV**: d=256 numbers per position — too compressed, loses information
-- **Hebbian**: d²=4,096 numbers — stores correlations, not raw tokens
-- **Attention**: T×d=65,536 numbers — stores everything, expensive
+| Approach | Memory size | Per-step cost |
+|----------|-----------|---------------|
+| RWKV / Recurrence | d = 256 numbers | O(d) — too compressed |
+| **Hebbian (ours)** | **d² = 4,096 numbers** | **O(T × d²) — just right** |
+| Attention | T × d = 65,536 numbers | O(T² × d) — too expensive |
 
 ### Results
 
-| Model | Params | Training | PPL |
-|---|---|---|---|
-| **v7.2 CORTEX-VI** | 5.0M | 7 min | **15.58** |
-| v7.1 CORTEX-III | 4.6M | 2 hours | 18.16 |
-| v5.2 Nova-Ignition | 5.0M | 2 hours | 10.56 |
+| Model | Architecture | Training | PPL |
+|-------|-------------|----------|----:|
+| **v7.2 CORTEX-VI** | Gated Conv + Hebbian | **7 min** | **15.58** |
+| v7.1 CORTEX-III | Gated Conv only | 2 hours | 18.16 |
+| v5.2 Nova-Ignition | Transformer | 2 hours | 10.56 |
 
-v7.2 in **7 minutes** already beats v7.1's **2-hour** result. Full 2-hour training is running — targeting PPL below 10.
+v7.2 in 7 minutes already beats v7.1's 2-hour result. Full 2-hour training is running.
 
 ### Architecture
 
 ```
-Token → Embed (4096 → 256) → RMSNorm
-  → ×6 layers:
-      Gated Conv (k=15, local RF=85)    ← grammar, word choice
-      Hebbian Memory (d_mem=64, global)  ← characters, plot, setting
-      SwiGLU FFN (256 → 512 → 256)      ← nonlinear features
-  → RMSNorm → Output Head (weight-tied)
+Input tokens
+    ↓
+Embedding (4096 → 256) + RMSNorm
+    ↓
+×6 layers:
+  ┌─────────────────────────────────┐
+  │  Gated Conv (k=15, RF=85)       │  ← local: grammar, word choice
+  │  Hebbian Memory (d_mem=64)      │  ← global: characters, plot
+  │  SwiGLU FFN (256→512→256)       │  ← nonlinear features
+  └─────────────────────────────────┘
+    ↓
+RMSNorm → Linear Head (weight-tied with embedding)
 ```
 
-- d_model=256, 6 layers, d_ff=512, ~5.0M parameters
-- Hebbian: d_mem=64, decay=0.99, per-layer correlation matrix
-- ~3,200 tok/s on 2 vCPU (~13% slower than v7.1 for full global context)
-- Training: LR=3e-3, warmup=500, weight_decay=0.01, dropout=0.0
+**Config:** d=256 · 6 layers · d_ff=512 · k=15 · d_mem=64 · decay=0.99 · ~5.0M params · ~3,200 tok/s
+
+**Training:** LR=3e-3 · warmup=500 · wd=0.01 · dropout=0 · batch=16 · seq=256
 
 ---
 
 ## Experiment History
 
-### CORTEX-VI: Hebbian Associative Memory — Success
+Every architecture tested for the CORTEX series. Only CORTEX-VI (Hebbian Memory) beat the baseline.
 
-**Idea**: A d_mem × d_mem correlation matrix stores pairwise feature co-occurrences. 256× more capacity than RWKV's d-vector, 32× more compressed than attention. Nearly free to compute because it uses parallel matrix multiplication.
+### CORTEX-VI — Hebbian Associative Memory ✓
 
-**Result**: 3.37× better PPL than baseline in 7 minutes. First architecture to beat v7.1.
+**Idea:** A d_mem × d_mem correlation matrix captures pairwise feature co-occurrences. 256× more capacity than RWKV, 32× more compressed than attention. Computed in parallel — no sequential loop.
 
-### CORTEX-V: Story Memory — Failed
+**Result:** **3.37× better PPL** than Gated Conv baseline in 7 minutes.
 
-**Idea**: 8 learned memory slots × 32 dims per layer with sigmoid write gate and softmax read.
+### CORTEX-V — Story Memory ✗
 
-**Result**: PPL 1.44× worse, 37% slower. The sequential Python loop over T=256 starved the model of training tokens. At equal token counts, PPL was actually tied — concept was sound but implementation too expensive.
+**Idea:** 8 learned memory slots × 32 dims per layer with sigmoid write gate and softmax read.
 
-**Lesson**: Speed = quality at short training. Any mechanism must add <15% overhead.
+**Result:** PPL 1.44× worse, 37% slower. Sequential Python loop over T=256 starved the model of tokens. At equal token counts PPL was tied — concept sound, implementation too slow.
 
-### CORTEX-IV: Data-Dependent Receptive Field — Failed
+**Lesson:** Any mechanism must add <15% overhead. Speed = quality.
 
-**Idea**: 7 exponential taps at distances [1,2,4,8,16,32,64] with data-dependent softmax weights.
+### CORTEX-IV — Data-Dependent Receptive Field ✗
 
-**Result**: PPL 1.13× worse, 21% slower. Sparse exponential taps can't match dense convolution for local patterns.
+**Idea:** 7 exponential taps at [1,2,4,8,16,32,64] with data-dependent softmax weights.
 
-### CORTEX-III: Architecture Sweep — Found winner
+**Result:** PPL 1.13× worse, 21% slower. Sparse taps can't match dense convolution.
 
-Systematic test of 10+ architectures (10 min each):
+### CORTEX-III — Architecture Sweep ✓
+
+Systematic test of 10+ architectures (10 min each, same config):
 
 | Architecture | PPL | Speed | Notes |
-|---|---|---|---|
+|-------------|-----:|------:|-------|
 | **Gated Conv k=15** | **43.69** | **3,436** | **Winner** |
 | Gated Conv k=8 | 46.44 | 3,414 | Baseline |
 | Local-then-Global | 44.66 | 3,360 | k=8 early + k=7 dilated late |
 | + Position Embeddings | 47.52 | 3,353 | Position emb HURT |
 | Transformer (Attention) | ~76 | ~3,000 | O(n²) too slow on CPU |
-| CORTEX-II (MSAC) | 55.21 | 2,866 | 3 parallel convs too slow |
+| CORTEX-II MSAC | 55.21 | 2,866 | 3 parallel convs too slow |
 | CORTEX-III staggered | 58.11 | 3,316 | k=3 at layer 0 too narrow |
-| RWKV | 84-88 | ~3,000 | Doesn't work below 100M params |
+| RWKV | 84-88 | ~3,000 | Fails below 100M params |
 
-Key findings:
-- **Dense wide kernel beats sparse dilation** — language needs every word, not scattered samples
-- **Speed = quality** — fastest architecture consistently won
-- **Position embeddings hurt** — causal conv already encodes relative position
-- **Aggressive training dominates** — LR=3e-3 beats LR=5e-4 by 2.5×
+**Findings:** Dense wide kernel beats sparse dilation · Speed = quality · Position embeddings hurt · LR=3e-3 beats LR=5e-4 by 2.5×
 
-### CORTEX-II: Multi-Scale Adaptive Conv — Failed
+### CORTEX-II — Multi-Scale Adaptive Conv ✗
 
 Three parallel conv branches per layer at different scales. Too slow (2,866 tok/s) and worse PPL.
 
-### v7 CORTEX — Failed
+### v7 CORTEX — RWKV + Ternary ✗
 
-RWKV + ternary weights. PPL 377.66 — 36× worse than v5.2. Root causes:
-- RWKV doesn't work below 100M params (recurrent state too small)
-- Ternary weights catastrophic at 7M scale (only viable at 3B+)
-- Hyperparameters 10× off (LR, weight decay, warmup all wrong)
-
----
-
-## Project Philosophy
-
-1. **Train from scratch.** No fine-tuning pretrained models.
-2. **Fixed time budgets.** 2 hours unless noted. Forces efficiency.
-3. **Honest reporting.** All experiments documented, including failures.
-4. **Constrained hardware.** Free-tier cloud CPUs. No GPUs.
-5. **Research-driven.** Architecture choices backed by systematic experiments.
+PPL 377.66 — 36× worse than v5.2. RWKV doesn't work below 100M params. Ternary weights catastrophic at 7M scale. Hyperparameters 10× off.
 
 ---
 
@@ -164,16 +163,25 @@ FlashLM/
 ├── README.md
 ├── LICENSE
 ├── v7/
-│   ├── train_v72.py                     ← v7.2 CORTEX-VI (Hebbian + Gated Conv)
-│   ├── cortex6_hebbian_experiment.py    ← 7-min proof-of-concept experiment
-│   ├── train_v71.py                     ← v7.1 CORTEX-III (Gated Conv only)
-│   └── train.py                         ← v7 CORTEX (failed, RWKV)
+│   ├── train_v72.py              ← v7.2 CORTEX-VI training
+│   ├── train_v71.py              ← v7.1 CORTEX-III training
+│   └── train.py                  ← v7 CORTEX (failed)
 └── archive/
-    ├── eval_bpc.py                      ← BPC evaluation
-    ├── train_v4.py                      ← v4 Bolt
-    ├── train_v52_nova_ignition.py       ← v5.2 Nova-Ignition
-    └── train_v6_supernova.py            ← v6 SUPERNOVA
+    ├── eval_bpc.py               ← BPC evaluation
+    ├── train_v4.py               ← v4 Bolt
+    ├── train_v52_nova_ignition.py← v5.2 Nova-Ignition
+    └── train_v6_supernova.py     ← v6 SUPERNOVA
 ```
+
+---
+
+## Philosophy
+
+1. **Train from scratch** — no fine-tuning pretrained models
+2. **Fixed time budgets** — 2 hours unless noted, forces efficiency
+3. **Honest reporting** — all experiments documented, including failures
+4. **Constrained hardware** — free-tier cloud CPUs, no GPUs
+5. **Research-driven** — architecture choices backed by systematic experiments
 
 ---
 
@@ -192,7 +200,7 @@ FlashLM/
 - [Scaling Laws for Ternary Language Models — TriTera](https://aclanthology.org/2025.acl-long.1294/) (Vaidhya et al., ACL 2025)
 - [TinyStories](https://arxiv.org/abs/2305.07759) (Eldan & Li, 2023)
 - [RWKV: Reinventing RNNs for the Transformer Era](https://arxiv.org/abs/2305.13048) (Peng et al., 2023)
-- [Transformers are RNNs: Linear Attention](https://arxiv.org/abs/2006.16236) (Katharopoulos et al., 2020) — theoretical basis for Hebbian memory
+- [Transformers are RNNs: Linear Attention](https://arxiv.org/abs/2006.16236) (Katharopoulos et al., 2020)
 - [Language Modeling with Gated Convolutional Networks](https://arxiv.org/abs/1612.08083) (Dauphin et al., 2017)
 
 ---
@@ -203,6 +211,17 @@ FlashLM/
 - Code assistance by **Claude Code** (Anthropic). Architecture design and research direction by Cheng Chang.
 
 ---
+
+## Citation
+
+```bibtex
+@misc{flashlm,
+  author = {Cheng Chang},
+  title = {FlashLM: Small Language Models with Hebbian Associative Memory},
+  year = {2026},
+  url = {https://github.com/changcheng967/FlashLM}
+}
+```
 
 ## License
 
