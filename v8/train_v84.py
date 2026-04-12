@@ -8,8 +8,8 @@ proved 1.7M params CAN generate coherent English with full training.
 v8.4: CORTEX architecture scaled down to match the proven scale.
   - Full causal attention (SWA=256 = full sequence, no window limit)
   - Gated Delta Memory retained (d_mem=32)
-  - ~1.8M params, ~3000+ tok/s
-  - 10M token subset = ~2+ epochs in 2h
+  - ~1.8M params, ~2000+ tok/s
+  - 5M token subset = ~4+ epochs in 2h
   - No lookahead heads, no entropy reg — pure baseline
 
 Usage:  python v8/train_v84.py                # 2 hours
@@ -25,12 +25,12 @@ from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 
 try:
-    torch.set_num_threads(4)
+    torch.set_num_threads(2)
     torch.set_num_interop_threads(1)
 except RuntimeError:
     pass
-os.environ['OMP_NUM_THREADS'] = '4'
-os.environ['MKL_NUM_THREADS'] = '4'
+os.environ['OMP_NUM_THREADS'] = '2'
+os.environ['MKL_NUM_THREADS'] = '2'
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR / 'data'
@@ -45,7 +45,7 @@ VALID_URL = ("https://huggingface.co/datasets/roneneldan/TinyStories/"
 # CONFIG — lean CORTEX, full attention
 # ============================================================================
 VOCAB_SIZE = 4096
-SUBSET_TOKENS = 10_000_000   # 10M tokens — target 2+ epochs
+SUBSET_TOKENS = 5_000_000    # 5M tokens — target 4+ epochs (TinyStories: grammar emerges at 3-5 epochs)
 
 # Lean CORTEX architecture (~1.8M params)
 D_MODEL = 128
@@ -446,7 +446,7 @@ def train(tokenizer, vocab, train_ds, val_data, minutes):
                           num_workers=0, drop_last=True, pin_memory=False)
 
     toks_per_step = BATCH_SIZE * SEQ_LEN * GRAD_ACCUM
-    est_speed = 3000  # smaller + 4 threads = faster
+    est_speed = 2000  # conservative with 2 threads
     total_steps = int(total_seconds * est_speed / toks_per_step)
     est_epochs = (total_steps * toks_per_step) / SUBSET_TOKENS
 
@@ -584,7 +584,7 @@ def main():
     print(f"{'=' * 70}")
     print(f"  d={D_MODEL} | {N_LAYERS}L | d_ff={D_FF} | {N_HEADS}H | d_head={D_HEAD}")
     print(f"  Full causal attention + Gated Delta Memory")
-    print(f"  Subset: {SUBSET_TOKENS/1e6:.0f}M tokens | Time: {args.minutes:.0f} min | 4 threads")
+    print(f"  Subset: {SUBSET_TOKENS/1e6:.0f}M tokens | Time: {args.minutes:.0f} min | 2 threads")
 
     print(f"\n--- Data ---")
     tokenizer, vocab, train_ds, val_data = prepare_data()
