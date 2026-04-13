@@ -8,6 +8,8 @@ No GPUs · No pretraining · Trained from scratch on free-tier CPUs
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+[**Development Log**](DEVLOG.md) — full research history from v3 to present
+
 </div>
 
 ---
@@ -27,6 +29,7 @@ No GPUs · No pretraining · Trained from scratch on free-tier CPUs
 | v8.1 | SearchLM | CORTEX-VIII + Value Heads | 6.6M | 2 vCPU | 2h | 2.40 | Superseded |
 | v8.2 | CORTEX-VIII | + Subset Training (20M tok) | 6.6M | 2 vCPU | 2h | 2.42 | Superseded |
 | **v8.3** | **CORTEX-VIII** | **+ 10M subset + Entropy Reg** | **6.6M** | **2 vCPU** | **2h** | **2.50** | **Current** |
+| v8.4 | Lean CORTEX | Full Attention + Delta Memory | 1.77M | 2 vCPU | 2h | 7.80 | Too small |
 
 ### Evolution
 
@@ -154,6 +157,7 @@ Filter TinyStories to only the simplest stories (10-40 words). A 6.6M model trai
 ```
 FlashLM/
 +-- README.md
++-- DEVLOG.md                     development log (v3→present)
 +-- LICENSE
 +-- v4/
 |   +-- train_v4_bolt.py              v4 Bolt (ternary recurrence)
