@@ -205,6 +205,24 @@ Inspired by AlphaGo and DeepMind's test-time compute scaling: can a smaller mode
 
 ---
 
+## Phase 6: CPU-Native Architecture Exploration (v9)
+
+After v8.4 confirmed that smaller models with more epochs don't solve coherence, we shifted focus from "fixing generation" to "exploring architectures that could fundamentally compete with GPU models on CPU."
+
+The core question: can ternary (1.58-bit) weights and linear-complexity sequence modeling match or exceed float32 performance at the same parameter count?
+
+### v9.0 — BitCortex-SSM (In Progress)
+- **Architecture:** BitLinear (1.58-bit ternary {-1,0,1}) + MiniSSM (d_state=16)
+- Replaces all float32 matmul with ternary operations via Straight-Through Estimator (STE)
+- Replaces Gated Delta Memory with simplified selective state space module
+- Built on v8.4 Lean CORTEX skeleton for direct comparison
+- **~1.8M params** (majority ternary, embeddings/gates stay float)
+- Full causal attention + MiniSSM + SwiGLU FFN, all with BitLinear
+- 5M subset, 2h training, MAX_LR=1e-3 (higher for STE)
+- **Tests:** Can ternary weights match float32 PPL at CORTEX scale? Can SSM replace delta memory?
+
+---
+
 ## Cumulative Results
 
 | Version | Architecture | Params | Time | PPL | Generation | Verdict |
@@ -225,6 +243,7 @@ Inspired by AlphaGo and DeepMind's test-time compute scaling: can a smaller mode
 | v8.2 CORTEX-VIII | + subset + entropy | 6.6M | 2h | 2.42 | Loops broken | Entropy reg breaks repetition |
 | v8.3 CORTEX-VIII | + 10M subset | 6.6M | 2h | 2.50 | Best diversity | PPL ≠ coherence |
 | v8.4 Lean CORTEX | Full attn, 1.77M | 1.77M | 2h | 7.80 | "learned lesson" collapse | Too small for CORTEX |
+| v9.0 BitCortex-SSM | Ternary + MiniSSM | ~1.8M | 2h | TBD | TBD | Testing ternary + SSM |
 
 ---
 
@@ -261,4 +280,4 @@ Inspired by AlphaGo and DeepMind's test-time compute scaling: can a smaller mode
 ---
 
 *Last updated: 2026-04-12*
-*Next entry: v9 — Knowledge Distillation (planned)*
+*Next entry: v9.0 BitCortex-SSM results*
