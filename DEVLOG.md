@@ -253,6 +253,26 @@ Every existing LM architecture (transformer, Mamba, RWKV, even CORTEX) is design
 
 **Tests:** Can a model with zero attention and zero float matmul learn language at all?
 
+#### Results — FAILED
+
+- **PPL: 130.19** (17x worse than v8.4's 7.80, 56x worse than v7.4's 2.33)
+- **Speed: 2,771 tok/s** (slower than v8.4's 4,170 — "CPU-native" ops were slower inside PyTorch)
+- **Generation:** Complete collapse — "time time time", "girl girl girl", "cat cat cat" at all temperatures
+
+#### Why it failed:
+
+1. **Cell memory never learned useful routing.** XNOR + popcount routing produced ~uniform attention over all cells. The model couldn't learn WHICH cells to read — it just read from all of them equally, making the 128-cell memory no better than a single averaged vector.
+
+2. **Running state too simple.** `h = decay * h + gate * x` is a first-order exponential smoother — it can track ONE decayed average per dimension. Language needs to track multiple simultaneous dependencies (subject-verb agreement, nested clauses, coreference). A single decay constant can't represent competing timescales.
+
+3. **Removed attention too aggressively.** Binary routing was supposed to replace attention's content-based lookup. But attention's QK matmul computes genuine similarity in a learned high-dimensional space. XNOR + popcount on ternarized patterns is a crude approximation that throws away the continuous similarity structure.
+
+4. **"CPU-native" was theoretical inside PyTorch.** PyTorch optimizes float matmul via MKL/BLAS (written in assembly, cache-aware). Custom Python loops (sequential scan, ternary_ste ×24 calls per forward) are slower than optimized float matmul despite 800x fewer FLOPs on paper. The FLOP advantage only materializes in custom C kernels, not in Python/PyTorch.
+
+5. **1.23M params too small.** Even with perfect architecture, 1.23M params is barely above the TinyStories minimum (~1.7M). The ternary FFN (38% of params) adds effective capacity, but the cell memory and routing parameters (20% of params) don't contribute useful computation.
+
+#### Key lesson: CPU-native operations must be implemented in CPU-native code, not PyTorch. The FLOP advantage of XNOR/popcount over float matmul is real at the hardware level but invisible inside PyTorch's optimized float runtime.
+
 ---
 
 ## Cumulative Results
@@ -275,7 +295,7 @@ Every existing LM architecture (transformer, Mamba, RWKV, even CORTEX) is design
 | v8.2 CORTEX-VIII | + subset + entropy | 6.6M | 2h | 2.42 | Loops broken | Entropy reg breaks repetition |
 | v8.3 CORTEX-VIII | + 10M subset | 6.6M | 2h | 2.50 | Best diversity | PPL ≠ coherence |
 | v8.4 Lean CORTEX | Full attn, 1.77M | 1.77M | 2h | 7.80 | "learned lesson" collapse | Too small for CORTEX |
-| v9.0 Reckoning | CPU-native (no attn/matmul) | ~1.2M | 2h | TBD | TBD | Binary routing + cell memory |
+| v9.0 Reckoning | CPU-native (no attn/matmul) | ~1.2M | 2h | 130.19 | "time time time" collapse | Cell routing failed, slower than float |
 
 ---
 
@@ -311,5 +331,5 @@ Every existing LM architecture (transformer, Mamba, RWKV, even CORTEX) is design
 
 ---
 
-*Last updated: 2026-04-12*
-*Next entry: v9.0 BitCortex-SSM results*
+*Last updated: 2026-04-15*
+*Next entry: TBD — v9.0 Reckoning failed, deciding next direction*

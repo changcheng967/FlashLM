@@ -30,6 +30,7 @@ No GPUs · No pretraining · Trained from scratch on free-tier CPUs
 | v8.2 | CORTEX-VIII | + Subset Training (20M tok) | 6.6M | 2 vCPU | 2h | 2.42 | Superseded |
 | **v8.3** | **CORTEX-VIII** | **+ 10M subset + Entropy Reg** | **6.6M** | **2 vCPU** | **2h** | **2.50** | **Current** |
 | v8.4 | Lean CORTEX | Full Attention + Delta Memory | 1.77M | 2 vCPU | 2h | 7.80 | Too small |
+| v9.0 | Reckoning | CPU-native (binary routing + cell mem) | ~1.2M | 2 vCPU | 2h | 130.19 | Failed |
 
 ### Evolution
 
@@ -54,7 +55,11 @@ v8.1 SearchLM           6.6M   PPL  2.40   2h  · 2 vCPU        · CORTEX + valu
  ↓
 v8.2 CORTEX-VIII        6.6M   PPL  2.42   2h  · 2 vCPU        · subset + entropy reg
  ↓
-v8.3 CORTEX-VIII        6.6M   PPL  2.50   2h  · 2 vCPU        · best generation ← current
+v8.3 CORTEX-VIII        6.6M   PPL  2.50   2h  · 2 vCPU        · best generation
+ ↓
+v8.4 Lean CORTEX        1.8M   PPL  7.80   2h  · 2 vCPU        · too small for CORTEX
+ ↓
+v9.0 Reckoning          1.2M   PPL 130.19  2h  · 2 vCPU        · CPU-native failed ← current
 ```
 
 ---
@@ -180,7 +185,8 @@ FlashLM/
     +-- train_v81.py                  v8.1 (CORTEX + lookahead)
     +-- train_v82.py                  v8.2 (subset + entropy reg)
     +-- train_v83.py                  v8.3 (best generation)
-    +-- train_v84.py                  v8.4 CORTEX-IX (in progress)
+    +-- train_v84.py                  v8.4 Lean CORTEX (too small)
+    +-- train_v90.py                  v9.0 Reckoning (CPU-native, failed)
     +-- generate_v81.py               v8.1 generation test
     +-- generate_v83.py               v8.3 generation test
     +-- generate_knn.py               kNN retrieval augmented generation
