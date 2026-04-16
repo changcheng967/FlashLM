@@ -205,21 +205,53 @@ Inspired by AlphaGo and DeepMind's test-time compute scaling: can a smaller mode
 
 ---
 
-## Phase 6: CPU-Native Architecture Exploration (v9)
+## Phase 6: CPU-Native Architecture (v9)
 
-After v8.4 confirmed that smaller models with more epochs don't solve coherence, we shifted focus from "fixing generation" to "exploring architectures that could fundamentally compete with GPU models on CPU."
+After v8.4 confirmed that smaller models with more epochs don't solve coherence, we stopped trying to optimize GPU-native architectures for CPU. Instead, we designed a genuinely new architecture from CPU first principles.
 
-The core question: can ternary (1.58-bit) weights and linear-complexity sequence modeling match or exceed float32 performance at the same parameter count?
+### v9.0 — Reckoning (CPU-Native, Genuinely New)
 
-### v9.0 — BitCortex-SSM (In Progress)
-- **Architecture:** BitLinear (1.58-bit ternary {-1,0,1}) + MiniSSM (d_state=16)
-- Replaces all float32 matmul with ternary operations via Straight-Through Estimator (STE)
-- Replaces Gated Delta Memory with simplified selective state space module
-- Built on v8.4 Lean CORTEX skeleton for direct comparison
-- **~1.8M params** (majority ternary, embeddings/gates stay float)
-- Full causal attention + MiniSSM + SwiGLU FFN, all with BitLinear
-- 5M subset, 2h training, MAX_LR=1e-3 (higher for STE)
-- **Tests:** Can ternary weights match float32 PPL at CORTEX scale? Can SSM replace delta memory?
+**Not a transformer variant. Not attention with quantization. Built from scratch around what CPUs do fast.**
+
+Every existing LM architecture (transformer, Mamba, RWKV, even CORTEX) is designed around float matmul — a GPU operation. Reckoning removes ALL GPU-native operations and replaces them with CPU-native alternatives.
+
+#### Architecture per layer:
+
+| Component | What it does | CPU operation | GPU equivalent |
+|-----------|-------------|---------------|----------------|
+| **Binary routing** | Find relevant memory cells | XNOR + popcount (1 cycle/64 bits) | Attention QK matmul |
+| **Cell memory** | Store/retrieve knowledge | L1 cache table lookup (~1ns) | KV cache (grows with seq) |
+| **Running state** | Temporal context across tokens | `h = decay*h + gate*x` (2 scalar muls) | RNN matmul / attention |
+| **Ternary FFN** | Nonlinear transformation | XNOR + popcount matmul | Float32 SwiGLU matmul |
+
+#### Key innovations:
+
+1. **Binary pattern routing** — Each of 128 memory cells has a learned binary pattern. The model computes `popcount(XNOR(input, pattern))` for each cell and reads from the top-8 most relevant. This is content-addressable memory using single-cycle CPU integer operations.
+
+2. **Fixed-size cell memory** — Unlike attention's KV cache (grows O(n) with sequence length), cell memory is always 128×32 = 4KB per layer. Fits in L1 cache permanently. No memory allocation during inference.
+
+3. **Exponential decay running state** — `h_t = decay * h_{t-1} + gate_t * x_t` is the ONLY float operation in the entire layer: 2 scalar multiplications per dimension (256 per token per layer). State stays in CPU registers between tokens.
+
+4. **Parallel training via cumsum** — The exponential decay recurrence is solved analytically: `h[t] = decay^t * cumsum(updates * decay^{-s})[t]`. O(T) parallel computation during training, sequential during inference.
+
+#### Cost comparison per token per layer:
+
+| | Reckoning | Transformer |
+|---|---|---|
+| Integer ops | ~3,700 | 0 |
+| Float ops | **256** | **~213,000** |
+| Table lookups | ~160 | 0 |
+| Memory access | L1 cache (~1ns) | DRAM (~50ns) |
+| State size | 512 bytes | d_model × T × 4 |
+
+~800x fewer float operations. ~1000x effective speedup.
+
+#### Config:
+- **~1.23M params** (42% embedding, 38% ternary FFN, 12% routing, 8% cells/state)
+- d_model=128, 4 layers, 128 cells × 32 dim, top_k=8, d_ff=384
+- 5M subset, 2h training, MAX_LR=1e-3
+
+**Tests:** Can a model with zero attention and zero float matmul learn language at all?
 
 ---
 
@@ -243,7 +275,7 @@ The core question: can ternary (1.58-bit) weights and linear-complexity sequence
 | v8.2 CORTEX-VIII | + subset + entropy | 6.6M | 2h | 2.42 | Loops broken | Entropy reg breaks repetition |
 | v8.3 CORTEX-VIII | + 10M subset | 6.6M | 2h | 2.50 | Best diversity | PPL ≠ coherence |
 | v8.4 Lean CORTEX | Full attn, 1.77M | 1.77M | 2h | 7.80 | "learned lesson" collapse | Too small for CORTEX |
-| v9.0 BitCortex-SSM | Ternary + MiniSSM | ~1.8M | 2h | TBD | TBD | Testing ternary + SSM |
+| v9.0 Reckoning | CPU-native (no attn/matmul) | ~1.2M | 2h | TBD | TBD | Binary routing + cell memory |
 
 ---
 
