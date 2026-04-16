@@ -276,7 +276,7 @@ class ReckoningLayer(nn.Module):
         # h_t = decay * h_{t-1} + gate_t * x_t
         # Only 2 * d_model scalar float multiplications per token.
         # At inference: h stays in CPU registers. No memory traffic.
-        self.state_decay = nn.Parameter(torch.tensor(-0.1))  # sigmoid ≈ 0.475
+        self.state_decay = nn.Parameter(torch.tensor(3.0))  # sigmoid(3) ≈ 0.95, good memory
         self.state_gate_w = nn.Parameter(torch.ones(d_model) * 0.1)
         self.state_gate_b = nn.Parameter(torch.zeros(d_model))
         self.state_scale = nn.Parameter(torch.ones(d_model) * 0.1)
@@ -326,13 +326,11 @@ class ReckoningLayer(nn.Module):
     def _running_state(self, x):
         """Exponential decay running state for temporal context.
 
-        h[t] = sum_{s=0}^{t} gate(s) * x(s) * decay^(t-s)
+        h[t] = decay * h[t-1] + gate[t] * x[t]
 
-        Computed via cumsum trick for parallel training.
-        At inference: sequential h = h*decay + gate*x (in registers).
-
-        This is the ONLY place with float multiplications:
-        exactly 2 * d_model = 256 per token per layer.
+        Sequential scan — this IS the CPU-native way to process sequences.
+        No parallel tricks needed. Each step: 1 multiply + 1 add per dim.
+        Numerically stable (no inverse decay powers).
         """
         B, T, D = x.shape
 
@@ -343,16 +341,13 @@ class ReckoningLayer(nn.Module):
         # Exponential decay (scalar, learned)
         decay = torch.sigmoid(self.state_decay).clamp(0.01, 0.99)
 
-        # Parallel cumsum trick:
-        # h[t] = decay^t * cumsum(updates * decay^{-s})[t]
-        # O(T) operations, not O(T²)
-        t = torch.arange(T, device=x.device, dtype=x.dtype)
-        d_pow = decay.pow(t)                          # decay^0, decay^1, ...
-        inv_d_pow = 1.0 / d_pow.clamp(min=1e-20)     # decay^0, decay^-1, ...
-
-        scaled = updates * inv_d_pow.unsqueeze(0).unsqueeze(-1)
-        cum = torch.cumsum(scaled, dim=1)
-        state = cum * d_pow.unsqueeze(0).unsqueeze(-1)
+        # Sequential scan: h[t] = h[t-1] * decay + updates[t]
+        # This is O(T) and numerically stable
+        state = torch.zeros_like(x)
+        h = x.new_zeros(B, D)
+        for t in range(T):
+            h = h * decay + updates[:, t]
+            state[:, t] = h
 
         return state * self.state_scale
 
