@@ -363,9 +363,9 @@ class ReckoningLayer(nn.Module):
         Inference: XNOR + popcount (ternary matmul)
         """
         h = self.ff_norm(x)
-        gate = F.linear(h, ternary_ste(self.W_ff_gate))
-        up = F.linear(h, ternary_ste(self.W_ff_up))
-        out = F.linear(F.silu(gate) * up, ternary_ste(self.W_ff_down))
+        gate = h @ ternary_ste(self.W_ff_gate)
+        up = h @ ternary_ste(self.W_ff_up)
+        out = (F.silu(gate) * up) @ ternary_ste(self.W_ff_down)
         return self.drop(out)
 
     def forward(self, x):
@@ -503,9 +503,9 @@ class ReckoningLM(nn.Module):
                 # Ternary FFN
                 h_sq2 = h.squeeze(1)
                 h_ff = layer.ff_norm(h_sq2)
-                g = F.linear(h_ff, ternary_ste(layer.W_ff_gate))
-                u = F.linear(h_ff, ternary_ste(layer.W_ff_up))
-                f_out = F.linear(F.silu(g) * u, ternary_ste(layer.W_ff_down))
+                g = h_ff @ ternary_ste(layer.W_ff_gate)
+                u = h_ff @ ternary_ste(layer.W_ff_up)
+                f_out = (F.silu(g) * u) @ ternary_ste(layer.W_ff_down)
                 h = (h_sq2 + layer.drop(f_out)).unsqueeze(1)  # (B, 1, D)
 
             logits = self.head(self.ln_out(h))[:, -1, :] / max(temperature, 1e-5)
