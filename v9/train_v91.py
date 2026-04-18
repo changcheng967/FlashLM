@@ -44,9 +44,11 @@ from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 
 # ============================================================================
-# THREAD CONFIG — 8 vCPU on EPYC 9754
+# THREAD CONFIG
 # ============================================================================
-N_THREADS = 8
+# Container may expose host CPU count (96) but only allocate 4.
+# Use --threads N to override, or set THREADS env var.
+N_THREADS = int(os.environ.get('THREADS', 4))
 try:
     torch.set_num_threads(N_THREADS)
     torch.set_num_interop_threads(1)
@@ -723,7 +725,18 @@ def train(tokenizer, vocab, train_ds, val_data, minutes):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--minutes', type=int, default=120)
+    parser.add_argument('--threads', type=int, default=0,
+                        help='CPU threads (0=auto, default 4)')
     args = parser.parse_args()
+
+    if args.threads > 0:
+        N_THREADS = args.threads
+        os.environ['OMP_NUM_THREADS'] = str(N_THREADS)
+        os.environ['MKL_NUM_THREADS'] = str(N_THREADS)
+        try:
+            torch.set_num_threads(N_THREADS)
+        except RuntimeError:
+            pass
 
     print("=" * 60)
     print(f"FlashLM v9.1 — Reckoning v2")
