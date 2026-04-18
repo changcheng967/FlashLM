@@ -59,10 +59,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR / 'data'
 OUT_DIR = SCRIPT_DIR / 'out_v91'
 
-TRAIN_URL = ("https://huggingface.co/datasets/roneneldan/TinyStories/"
+# China-accessible mirror (hf-mirror.com) — auto-falls back to direct URL
+_MIRROR = "https://hf-mirror.com"
+TRAIN_URL = (f"{_MIRROR}/datasets/roneneldan/TinyStories/"
              "resolve/main/TinyStoriesV2-GPT4-train.txt")
-VALID_URL = ("https://huggingface.co/datasets/roneneldan/TinyStories/"
+VALID_URL = (f"{_MIRROR}/datasets/roneneldan/TinyStories/"
              "resolve/main/TinyStoriesV2-GPT4-valid.txt")
+_TRAIN_DIRECT = ("https://huggingface.co/datasets/roneneldan/TinyStories/"
+                 "resolve/main/TinyStoriesV2-GPT4-train.txt")
+_VALID_DIRECT = ("https://huggingface.co/datasets/roneneldan/TinyStories/"
+                 "resolve/main/TinyStoriesV2-GPT4-valid.txt")
 
 # ============================================================================
 # CONFIG
@@ -132,15 +138,39 @@ def prepare_data():
     val_txt = data_dir / 'valid.txt'
 
     if not meta_path.exists() or not train_bin.exists() or not val_bin.exists():
+        def download(url, path):
+            """Try wget first (handles retries), fall back to urllib."""
+            print(f"  Downloading {path.name}...")
+            try:
+                ret = os.system(f'wget -q --show-progress --tries=5 --timeout=30 "{url}" -O "{path}"')
+                if ret == 0 and path.exists() and path.stat().st_size > 1000:
+                    print(f"    {path.stat().st_size / 1e6:.1f} MB")
+                    return True
+            except Exception:
+                pass
+            # Fallback: urllib
+            import urllib.request
+            try:
+                urllib.request.urlretrieve(url, str(path))
+                if path.exists() and path.stat().st_size > 1000:
+                    print(f"    {path.stat().st_size / 1e6:.1f} MB")
+                    return True
+            except Exception:
+                pass
+            return False
+
         if not train_txt.exists():
-            print("  Downloading TinyStories V2 train (~2GB)...")
-            import urllib.request
-            urllib.request.urlretrieve(TRAIN_URL, str(train_txt))
-            print(f"    {train_txt.stat().st_size / 1e6:.1f} MB")
+            if not download(TRAIN_URL, train_txt):
+                print("  Mirror failed, trying direct URL...")
+                if not download(_TRAIN_DIRECT, train_txt):
+                    raise RuntimeError("Cannot download training data. "
+                                       "Manually place TinyStoriesV2-GPT4-train.txt "
+                                       f"in {data_dir}")
         if not val_txt.exists():
-            print("  Downloading TinyStories V2 valid...")
-            import urllib.request
-            urllib.request.urlretrieve(VALID_URL, str(val_txt))
+            if not download(VALID_URL, val_txt):
+                print("  Mirror failed, trying direct URL...")
+                if not download(_VALID_DIRECT, val_txt):
+                    raise RuntimeError("Cannot download validation data.")
 
         print(f"  Training BPE tokenizer (vocab {VOCAB_SIZE})...")
         from tokenizers import Tokenizer
