@@ -273,6 +273,47 @@ Every existing LM architecture (transformer, Mamba, RWKV, even CORTEX) is design
 
 #### Key lesson: CPU-native operations must be implemented in CPU-native code, not PyTorch. The FLOP advantage of XNOR/popcount over float matmul is real at the hardware level but invisible inside PyTorch's optimized float runtime.
 
+### v9.1 — Reckoning v2 (Delta Rule + Running State + Conv)
+
+**Fixed all three v9.0 failures:**
+1. Binary routing → delta rule memory with learned float key matching (from CORTEX-VIII)
+2. Single scalar decay → data-dependent decay + gate per dimension (parallel cumsum)
+3. No local context → depthwise causal conv (k=7)
+4. Ternary FFN → standard float SwiGLU (MKL-optimized)
+
+**Scaled to 17.26M params** on Intel Xeon Platinum 8260 (4 vCPU, 32GB RAM).
+
+#### Architecture per layer:
+- **Local:** Depthwise causal conv (k=7) — sequential, cache-friendly
+- **Temporal:** Data-dependent running state with per-dimension decay (parallel cumsum in log-space)
+- **Global:** Delta rule memory (64×64 matrix per layer, static read — no sequential update during forward)
+- **FFN:** Standard SwiGLU (d_ff=1536)
+- **Combine:** Linear gate mixing all three streams
+
+#### Speed optimization:
+- Replaced Python for-loops with parallel cumsum + batched matmul → ~6x speedup
+- Added torch.compile (JIT compiles to C++)
+- Final: ~1,400 tok/s on 4 vCPU (vs v9.0's 2,771 on 2 vCPU — slower per thread but 17M vs 1.2M params)
+
+#### Results:
+
+- **PPL: 24.60** (5x better than v9.0's 130.19, but 10x worse than CORTEX-VIII's 2.33)
+- **Training:** 5,758 steps · 11.8M tokens · 120 min · ~1,400 tok/s
+- **Generation:** Words but no grammar — same PPL ≠ coherence problem as all sub-30M models
+
+#### Analysis:
+
+The architecture learns (PPL 130 → 25 is a real improvement), but the static delta memory is fundamentally weaker than CORTEX-VIII's sequential Gated DeltaNet. CORTEX-VIII updates M at each position during forward pass, accumulating sequence-dependent context. v9.1 reads from a static learned M that only changes between optimizer steps. This loses the core advantage of the delta rule — the ability to correct memory in-context.
+
+**Comparison at matched params/hardware:**
+
+| Model | Params | Hardware | PPL | Key difference |
+|-------|-------:|----------|----:|----------------|
+| CORTEX-VIII | 6.6M | 2 vCPU | 2.33 | Sequential delta update + SWA |
+| Reckoning v2 | 17.3M | 4 vCPU | 24.60 | Static delta read + running state |
+
+With 2.6x more params and 2x more compute, Reckoning v2 is 10x worse. The running state + conv combination provides temporal context, but without in-context memory updates, it can't compete with attention-based architectures.
+
 ---
 
 ## Cumulative Results
@@ -296,6 +337,7 @@ Every existing LM architecture (transformer, Mamba, RWKV, even CORTEX) is design
 | v8.3 CORTEX-VIII | + 10M subset | 6.6M | 2h | 2.50 | Best diversity | PPL ≠ coherence |
 | v8.4 Lean CORTEX | Full attn, 1.77M | 1.77M | 2h | 7.80 | "learned lesson" collapse | Too small for CORTEX |
 | v9.0 Reckoning | CPU-native (no attn/matmul) | ~1.2M | 2h | 130.19 | "time time time" collapse | Cell routing failed, slower than float |
+| v9.1 Reckoning v2 | Delta rule + state + conv | 17.3M | 2h | 24.60 | Words, no grammar | Static delta weaker than sequential |
 
 ---
 
@@ -331,5 +373,5 @@ Every existing LM architecture (transformer, Mamba, RWKV, even CORTEX) is design
 
 ---
 
-*Last updated: 2026-04-15*
-*Next entry: TBD — v9.0 Reckoning failed, deciding next direction*
+*Last updated: 2026-04-18*
+*Next entry: v9.2 — adding sequential delta updates to close gap with CORTEX-VIII*

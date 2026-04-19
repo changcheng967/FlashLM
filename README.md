@@ -31,6 +31,7 @@ No GPUs · No pretraining · Trained from scratch on free-tier CPUs
 | **v8.3** | **CORTEX-VIII** | **+ 10M subset + Entropy Reg** | **6.6M** | **2 vCPU** | **2h** | **2.50** | **Current** |
 | v8.4 | Lean CORTEX | Full Attention + Delta Memory | 1.77M | 2 vCPU | 2h | 7.80 | Too small |
 | v9.0 | Reckoning | CPU-native (binary routing + cell mem) | ~1.2M | 2 vCPU | 2h | 130.19 | Failed |
+| v9.1 | Reckoning v2 | Delta rule + running state + conv | 17.3M | 4 vCPU | 2h | 24.60 | Improving |
 
 ### Evolution
 
