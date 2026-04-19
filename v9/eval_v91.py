@@ -32,6 +32,8 @@ def main():
           f"tokens {ckpt.get('tokens_seen','?'):,}, "
           f"time {ckpt.get('elapsed_total',0)/60:.1f}m, "
           f"best_val {ckpt.get('best_val','?')}")
+    best_ppl = math.exp(min(ckpt.get('best_val', 99), 10))
+    print(f"Best val PPL: {best_ppl:.2f}")
 
     # Load data for tokenizer + validation
     from tokenizers import Tokenizer
@@ -42,7 +44,12 @@ def main():
     model = ReckoningV2(
         vocab=4096, d_model=384, n_layers=6, d_mem=64,
         conv_k=7, d_ff=1536, seq_len=256, dropout=0.0)
-    model.load_state_dict(ckpt['model_state'])
+
+    # Strip _orig_mod. prefix from torch.compile
+    state = ckpt['model_state']
+    if any(k.startswith('_orig_mod.') for k in state.keys()):
+        state = {k.replace('_orig_mod.', ''): v for k, v in state.items()}
+    model.load_state_dict(state)
     model.eval()
     print(f"Model loaded: {sum(p.numel() for p in model.parameters())/1e6:.1f}M params")
 
