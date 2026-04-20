@@ -314,6 +314,42 @@ The architecture learns (PPL 130 → 25 is a real improvement), but the static d
 
 With 2.6x more params and 2x more compute, Reckoning v2 is 10x worse. The running state + conv combination provides temporal context, but without in-context memory updates, it can't compete with attention-based architectures.
 
+### v9.2 — CORTEX-VIII + Story Compass (Directional Planning)
+
+After v9.1 showed that static delta memory was 10x worse than CORTEX-VIII, we returned to the proven CORTEX-VIII architecture and added a novel **Story Compass** head to test whether auxiliary training objectives could improve generation quality.
+
+#### Hypothesis
+
+At each position, a small MLP predicts a "direction vector" (d_model-dim) pointing toward the mean of future hidden states. During generation, this compass biases token sampling toward tokens aligned with the predicted story direction. If the model can learn where the story is heading, it might generate more coherent continuations.
+
+#### Architecture
+
+- **Base:** CORTEX-VIII (Gated DeltaNet + SWA + SwiGLU, same as v7.4)
+- **Addition:** Story Compass head per layer — 2-layer MLP predicting direction from hidden state
+- **Loss:** `total = CE + 0.5 * (1 - cosine_similarity(predicted, target))`
+- **Target:** Mean of future hidden states (computed via reverse cumsum trick)
+- **Params:** 6.70M (131K for compass, 6.57M for CORTEX-VIII)
+- **Hardware:** Intel Xeon Platinum 8260, 4 vCPU, 32GB RAM
+
+#### Results — FAILED
+
+- **PPL: 17.56** (best val, 7.5x worse than CORTEX-VIII's 2.33)
+- **Training:** 21,808 steps · 22.3M tokens · 120 min · 3,100 tok/s
+- **Compass cos_sim:** Peaked at 0.978 (step 350), declined to 0.87 and stayed there
+- **Generation:** Completely incoherent at all temperatures (T=0.1: loops, T=0.8: word fragments)
+
+#### Why it failed:
+
+1. **Objective conflict.** The compass and CE objectives competed for gradient budget. Compass cos_sim peaked early (0.978 at step 350) then degraded to 0.87 as CE improved. The model couldn't optimize both simultaneously.
+
+2. **Weight 0.5 was too aggressive.** Half the total loss came from compass, stealing gradient signal from the primary next-token prediction task. At 6.7M params, the model doesn't have capacity to spare.
+
+3. **PPL regression dominated any generation benefit.** Going from PPL 2.33 to 17.56 means the model's fundamental token prediction is 7.5x worse. No amount of compass-guided sampling can compensate for that.
+
+4. **6.7M params is still below coherence threshold.** Even the CORTEX-VIII baseline at PPL 2.33 couldn't generate coherent text. Making it worse doesn't help.
+
+#### Key lesson: Auxiliary objectives at small scale are a zero-sum game. Every unit of gradient budget spent on a secondary objective is stolen from the primary task. At 6.7M params, there's no surplus capacity. The compass idea might work at 30M+ where the model has spare capacity, but not here.
+
 ---
 
 ## Cumulative Results
@@ -338,6 +374,7 @@ With 2.6x more params and 2x more compute, Reckoning v2 is 10x worse. The runnin
 | v8.4 Lean CORTEX | Full attn, 1.77M | 1.77M | 2h | 7.80 | "learned lesson" collapse | Too small for CORTEX |
 | v9.0 Reckoning | CPU-native (no attn/matmul) | ~1.2M | 2h | 130.19 | "time time time" collapse | Cell routing failed, slower than float |
 | v9.1 Reckoning v2 | Delta rule + state + conv | 17.3M | 2h | 24.60 | Words, no grammar | Static delta weaker than sequential |
+| v9.2 CORTEX+Compass | CORTEX-VIII + Story Compass | 6.7M | 2h | 17.56 | Incoherent | Compass competed with CE, 7.5x PPL regression |
 
 ---
 
@@ -373,5 +410,5 @@ With 2.6x more params and 2x more compute, Reckoning v2 is 10x worse. The runnin
 
 ---
 
-*Last updated: 2026-04-18*
-*Next entry: v9.2 — adding sequential delta updates to close gap with CORTEX-VIII*
+*Last updated: 2026-04-19*
+*Next entry: v9.3 — pure CORTEX-VIII baseline on 4 vCPU to confirm architecture, then scale up on 16 vCPU machine*

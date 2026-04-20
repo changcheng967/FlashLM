@@ -32,6 +32,7 @@ No GPUs · No pretraining · Trained from scratch on free-tier CPUs
 | v8.4 | Lean CORTEX | Full Attention + Delta Memory | 1.77M | 2 vCPU | 2h | 7.80 | Too small |
 | v9.0 | Reckoning | CPU-native (binary routing + cell mem) | ~1.2M | 2 vCPU | 2h | 130.19 | Failed |
 | v9.1 | Reckoning v2 | Delta rule + running state + conv | 17.3M | 4 vCPU | 2h | 24.60 | Improving |
+| v9.2 | CORTEX+Compass | CORTEX-VIII + Story Compass | 6.7M | 4 vCPU | 2h | 17.56 | Compass hurt |
 
 ### Evolution
 
@@ -60,7 +61,11 @@ v8.3 CORTEX-VIII        6.6M   PPL  2.50   2h  · 2 vCPU        · best generati
  ↓
 v8.4 Lean CORTEX        1.8M   PPL  7.80   2h  · 2 vCPU        · too small for CORTEX
  ↓
-v9.0 Reckoning          1.2M   PPL 130.19  2h  · 2 vCPU        · CPU-native failed ← current
+v9.0 Reckoning          1.2M   PPL 130.19  2h  · 2 vCPU        · CPU-native failed
+ ↓
+v9.1 Reckoning v2      17.3M   PPL  24.60  2h  · 4 vCPU        · delta rule + running state
+ ↓
+v9.2 CORTEX+Compass     6.7M   PPL  17.56  2h  · 4 vCPU        · compass competed with CE ← current
 ```
 
 ---
