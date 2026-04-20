@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """
-FlashLM v9.4 — CORTEX-VIII + Pedagogical Curriculum Training (PCT)
-====================================================================
+FlashLM v9.4 — CORTEX-VIII + STMM + Pedagogical Curriculum Training (PCT)
+==========================================================================
 
-Trains CORTEX-VIII on API-generated high-signal data from prep_v94.py.
-Architecture unchanged from v7.4 (best PPL 2.33).
+Two innovations over baseline CORTEX-VIII:
+1. PCT data: API-generated high-signal training stories with verified
+   coreference, causal chains, and SIA narrative tags
+2. STMM (State-Tracking Memory Module): explicit entity state tracking
+   across sentence boundaries using GRU + VQ-VAE codebook + STE
 
-Innovation: Training data is engineered via LLM API for maximum causal
-signal density. Stories have verified coreference, causal chains, and
-narrative structure. SIA tags provide structural scaffolding.
+Architecture: CORTEX-VIII backbone (6.6M) + STMM (~100K) = ~6.7M params
+Single CE loss. No auxiliary objectives. CPU-native.
+
+STMM operates at SIA tag boundaries:
+  - [CHAR] tag: initialize new entity slot
+  - Other tags ([ACT], [FEEL], [EVENT], [RES]): update entity state
+  - VQ codebook (64 codes) forces discrete state commitment
+  - EMA codebook updates prevent collapse
+  - State injection conditions next CortexBlock on explicit entity state
 
 Usage:
   python v9/train_v94.py --minutes 120
@@ -55,6 +64,12 @@ D_MEM = 32
 SEQ_LEN = 256
 
 TAG_TOKENS = ["[SET]", "[CHAR]", "[ACT]", "[DIAL]", "[FEEL]", "[EVENT]", "[RES]", "[DESC]"]
+
+# STMM config
+STMM_MAX_ENTITIES = 4       # max concurrent entities to track
+STMM_CODEBOOK_SIZE = 64     # discrete state codes
+STMM_EMA_DECAY = 0.99       # codebook EMA update rate
+STMM_COMMIT_COST = 0.25     # commitment loss weight (auxiliary, lightweight)
 
 BATCH_SIZE = 4
 GRAD_ACCUM = 8
@@ -229,15 +244,168 @@ class CortexBlock(nn.Module):
 
 
 # ============================================================================
-# CORTEX-VIII MODEL
+# STMM: State-Tracking Memory Module
 # ============================================================================
-class CortexVIII(nn.Module):
+class StateTrackingMemory(nn.Module):
+    """
+    Explicit entity state tracking across sentence boundaries.
+
+    Operates at SIA tag positions:
+    - [CHAR] tag: initialize new entity slot
+    - Other tags: update active entity state via GRU
+    - VQ codebook: discrete state commitment (64 codes)
+    - STE: straight-through gradient estimation for quantization
+    - EMA codebook updates: prevent collapse
+
+    State injection: additive residual into CortexBlock input.
+    """
+
+    def __init__(self, d_model, max_entities=4, codebook_size=64, ema_decay=0.99):
+        super().__init__()
+        self.d_model = d_model
+        self.max_entities = max_entities
+        self.codebook_size = codebook_size
+        self.ema_decay = ema_decay
+
+        # Entity state GRU: update state from context
+        self.gru = nn.GRUCell(d_model, d_model)
+
+        # VQ codebook: discrete state codes
+        self.codebook = nn.Parameter(torch.randn(codebook_size, d_model) * 0.1)
+        self.register_buffer('ema_count', torch.zeros(codebook_size))
+        self.register_buffer('ema_weight', self.codebook.data.clone())
+
+        # Projection for injection
+        self.inject_proj = nn.Linear(d_model, d_model, bias=False)
+        nn.init.normal_(self.inject_proj.weight, std=0.02)
+
+        # Entity slot gating: which entity to update
+        self.entity_gate = nn.Linear(d_model, max_entities, bias=False)
+        nn.init.normal_(self.entity_gate.weight, std=0.02)
+
+        # Commitment loss tracker
+        self.commit_loss = 0.0
+
+    def quantize(self, z):
+        """VQ-VAE quantization with straight-through estimator."""
+        # z: (B, D)
+        # Find nearest codebook entry
+        dist = (z.unsqueeze(1) - self.codebook.unsqueeze(0)).pow(2).sum(-1)  # (B, K)
+        indices = dist.argmin(dim=-1)  # (B,)
+
+        # Straight-through: forward uses quantized, backward uses continuous z
+        z_q = self.codebook[indices]  # (B, D)
+        z_q_st = z + (z_q - z).detach()  # STE
+
+        # Commitment loss: encourage z to stay close to codebook
+        commit = F.mse_loss(z, z_q.detach())
+
+        # EMA codebook update
+        if self.training:
+            self._ema_update(z, indices)
+
+        return z_q_st, indices, commit
+
+    def _ema_update(self, z, indices):
+        """EMA update of codebook entries (prevents collapse)."""
+        with torch.no_grad():
+            one_hot = F.one_hot(indices, self.codebook_size).float()  # (B, K)
+            counts = one_hot.sum(0)  # (K,)
+            self.ema_count.mul_(self.ema_decay).add_(counts, alpha=1 - self.ema_decay)
+
+            # Sum of assigned vectors per code
+            sums = torch.zeros_like(self.codebook)  # (K, D)
+            sums.index_add_(0, indices, z)  # (K, D)
+            self.ema_weight.mul_(self.ema_decay).add_(sums, alpha=1 - self.ema_decay)
+
+            # Laplace smoothing
+            n = self.ema_count.sum()
+            counts_smooth = (self.ema_count + 1e-5) / (n + self.codebook_size * 1e-5) * n
+            self.codebook.data.copy_(self.ema_weight / counts_smooth.unsqueeze(1).clamp(min=1))
+
+    def forward(self, h, tag_positions, char_tag_id, tag_ids_set):
+        """
+        Process tag positions and update entity states.
+
+        Args:
+            h: hidden states (B, T, D)
+            tag_positions: list of (batch_idx, seq_pos, token_id) for each tag in the sequence
+            char_tag_id: token ID for [CHAR] tag
+            tag_ids_set: set of all tag token IDs
+
+        Returns:
+            injection: (B, T, D) — state injection to add to hidden states
+            commit_loss: scalar commitment loss
+        """
+        B, T, D = h.shape
+        device = h.device
+
+        # Entity state buffer: (B, max_entities, D)
+        entity_states = torch.zeros(B, self.max_entities, D, device=device)
+        active_entity = torch.zeros(B, dtype=torch.long, device=device)  # which slot to use
+
+        injection = torch.zeros(B, T, D, device=device)
+
+        if not tag_positions:
+            return injection, torch.tensor(0.0, device=device)
+
+        total_commit = 0.0
+        n_updates = 0
+
+        for batch_idx, seq_pos, token_id in tag_positions:
+            # Get the hidden state at this tag position
+            h_tag = h[batch_idx, seq_pos].unsqueeze(0)  # (1, D)
+
+            if token_id == char_tag_id:
+                # [CHAR] tag: initialize new entity slot
+                slot = active_entity[batch_idx] % self.max_entities
+                entity_states[batch_idx, slot] = h_tag.squeeze(0)
+                active_entity[batch_idx] += 1
+
+                # Quantize the initial state
+                z_q, idx, commit = self.quantize(h_tag)
+                entity_states[batch_idx, slot] = z_q.squeeze(0)
+                total_commit += commit
+                n_updates += 1
+            else:
+                # Other tag: update the most recent entity
+                if active_entity[batch_idx] > 0:
+                    slot = (active_entity[batch_idx] - 1) % self.max_entities
+                    current_state = entity_states[batch_idx, slot].unsqueeze(0)  # (1, D)
+
+                    # GRU update: state = GRU(state, context)
+                    new_state = self.gru(h_tag, current_state)  # (1, D)
+
+                    # Quantize
+                    z_q, idx, commit = self.quantize(new_state)
+                    entity_states[batch_idx, slot] = z_q.squeeze(0)
+                    total_commit += commit
+                    n_updates += 1
+
+            # Inject current entity state into this position
+            if active_entity[batch_idx] > 0:
+                slot = (active_entity[batch_idx] - 1) % self.max_entities
+                state_vec = entity_states[batch_idx, slot]  # (D,)
+                injection[batch_idx, seq_pos] = self.inject_proj(state_vec)
+
+        avg_commit = total_commit / max(n_updates, 1)
+        self.commit_loss = avg_commit
+        return injection, avg_commit
+
+
+# ============================================================================
+# CORTEX-VIII + STMM MODEL
+# ============================================================================
+class CortexVIII_STMM(nn.Module):
     def __init__(self, vocab, d_model, n_layers, d_ff, n_heads, d_head,
-                 window_size, d_mem, seq_len, dropout=0.0):
+                 window_size, d_mem, seq_len, tag_ids, dropout=0.0):
         super().__init__()
         self.seq_len = seq_len
         self.vocab = vocab
         self.d_model = d_model
+        self.tag_ids = tag_ids
+        self.id_to_tag = {v: k for k, v in tag_ids.items()}
+        self.tag_ids_set = set(tag_ids.values())
 
         self.embed = nn.Embedding(vocab, d_model)
         self.ln_in = RMSNorm(d_model)
@@ -248,15 +416,46 @@ class CortexVIII(nn.Module):
         self.head = nn.Linear(d_model, vocab, bias=False)
         self.head.weight = self.embed.weight
 
+        # STMM: one module shared across all layers
+        self.stmm = StateTrackingMemory(d_model, max_entities=STMM_MAX_ENTITIES,
+                                         codebook_size=STMM_CODEBOOK_SIZE,
+                                         ema_decay=STMM_EMA_DECAY)
+
         nn.init.normal_(self.embed.weight, std=0.02)
 
         total = sum(p.numel() for p in self.parameters())
-        print(f"  Model: CORTEX-VIII PCT | {total:,} ({total/1e6:.2f}M)")
+        stmm_params = sum(p.numel() for p in self.stmm.parameters())
+        print(f"  Model: CORTEX-VIII + STMM | {total:,} ({total/1e6:.2f}M)")
+        print(f"    STMM params: {stmm_params:,} ({stmm_params/1e3:.1f}K)")
         print(f"    d={d_model}, L={n_layers}, SWA_W={window_size}, d_mem={d_mem}")
+
+    def _find_tag_positions(self, x):
+        """Find all tag token positions in the input sequence."""
+        B, T = x.shape
+        positions = []
+        for b in range(B):
+            for t in range(T):
+                tok = x[b, t].item()
+                if tok in self.tag_ids_set:
+                    positions.append((b, t, tok))
+        return positions
 
     def forward(self, x, targets=None):
         B, T = x.shape
         h = self.ln_in(self.embed(x))
+
+        # Find tag positions for STMM
+        tag_positions = self._find_tag_positions(x)
+
+        # STMM: compute entity state injection (applied once, before blocks)
+        stmm_injection, commit_loss = self.stmm(h, tag_positions,
+                                                 self.tag_ids.get("[CHAR]", -1),
+                                                 self.tag_ids_set)
+
+        # Apply STMM injection at tag positions
+        h = h + stmm_injection
+
+        # Standard CORTEX-VIII forward
         for block in self.blocks:
             h = block(h)
         logits = self.head(self.ln_out(h))
@@ -264,21 +463,37 @@ class CortexVIII(nn.Module):
         if targets is None:
             return logits
 
-        loss = F.cross_entropy(
+        # CE loss + lightweight commitment loss
+        ce_loss = F.cross_entropy(
             logits[:, :-1].contiguous().view(-1, self.vocab),
             targets[:, 1:].contiguous().view(-1))
-        return loss
+
+        total_loss = ce_loss + STMM_COMMIT_COST * commit_loss
+        return total_loss
 
     @torch.no_grad()
     def generate_sia(self, idx, max_new_tokens, tokenizer, tag_ids, id_to_tag,
                      temperature=0.8, top_k=40):
-        """SIA-constrained generation."""
+        """SIA-constrained generation with STMM state tracking."""
         self.eval()
         expecting_tag = True
+        # Maintain STMM entity state across generation steps
+        entity_states = torch.zeros(1, STMM_MAX_ENTITIES, self.d_model, device=idx.device)
+        active_entity = 0
 
         for _ in range(max_new_tokens):
             ctx = idx[:, -self.seq_len:]
             h = self.ln_in(self.embed(ctx))
+
+            # Find tag positions in current context
+            tag_positions = self._find_tag_positions(ctx)
+
+            # STMM forward
+            stmm_injection, _ = self.stmm(h, tag_positions,
+                                           tag_ids.get("[CHAR]", -1),
+                                           set(tag_ids.values()))
+            h = h + stmm_injection
+
             for block in self.blocks:
                 h = block(h)
             logits = self.head(self.ln_out(h))[:, -1, :] / max(temperature, 1e-5)
@@ -376,10 +591,10 @@ def train(tokenizer, vocab, train_ds, val_data, tag_ids, id_to_tag, minutes):
     out_dir = Path(OUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model = CortexVIII(
+    model = CortexVIII_STMM(
         vocab=vocab, d_model=D_MODEL, n_layers=N_LAYERS, d_ff=D_FF,
         n_heads=N_HEADS, d_head=D_HEAD, window_size=SWA_WINDOW,
-        d_mem=D_MEM, seq_len=SEQ_LEN, dropout=DROPOUT)
+        d_mem=D_MEM, seq_len=SEQ_LEN, tag_ids=tag_ids, dropout=DROPOUT)
 
     decay_params, nodecay_params = [], []
     for name, param in model.named_parameters():
@@ -445,8 +660,12 @@ def train(tokenizer, vocab, train_ds, val_data, tag_ids, id_to_tag, minutes):
             avg_ce = running_loss / running_n
             tok_s = tokens_seen / elapsed
             ppl = math.exp(min(avg_ce, 10))
+            # Log STMM codebook usage
+            cb_used = 0
+            if hasattr(model.stmm, 'ema_count'):
+                cb_used = (model.stmm.ema_count > 0.5).sum().item()
             print(f"  step {step:>5d} | CE {avg_ce:.4f} PPL {ppl:.2f} | "
-                  f"tok/s {tok_s:.0f} | {elapsed/60:.1f}m")
+                  f"tok/s {tok_s:.0f} | STMM codes: {cb_used} | {elapsed/60:.1f}m")
             running_loss = running_n = 0
 
         if step % EVAL_EVERY == 0:
@@ -483,6 +702,11 @@ def train(tokenizer, vocab, train_ds, val_data, tag_ids, id_to_tag, minutes):
     print(f"\n{'='*60}")
     print(f"FINAL: val_PPL {val_ppl:.2f} (best {math.exp(min(best_val,10)):.2f})")
     print(f"Steps: {step} | Tokens: {tokens_seen:,} | Time: {(time.time()-t0)/60:.1f}m")
+
+    # Log final STMM stats
+    if hasattr(model.stmm, 'ema_count'):
+        cb_used = (model.stmm.ema_count > 0.5).sum().item()
+        print(f"STMM codebook: {cb_used}/{STMM_CODEBOOK_SIZE} codes used")
 
     model.eval()
     for temp in [0.1, 0.5, 0.8, 1.0]:
@@ -528,8 +752,8 @@ if __name__ == '__main__':
         except: pass
 
     print("=" * 60)
-    print(f"FlashLM v9.4 — CORTEX-VIII + PCT")
-    print(f"Pedagogical Curriculum Training")
+    print(f"FlashLM v9.4 — CORTEX-VIII + STMM + PCT")
+    print(f"State-Tracking Memory Module + Pedagogical Curriculum")
     print(f"Training: {args.minutes} min | {N_THREADS} threads")
     print("=" * 60)
 
