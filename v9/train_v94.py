@@ -67,9 +67,9 @@ TAG_TOKENS = ["[SET]", "[CHAR]", "[ACT]", "[DIAL]", "[FEEL]", "[EVENT]", "[RES]"
 
 # STMM config
 STMM_MAX_ENTITIES = 4       # max concurrent entities to track
-STMM_CODEBOOK_SIZE = 64     # discrete state codes
-STMM_EMA_DECAY = 0.99       # codebook EMA update rate
-STMM_COMMIT_COST = 0.25     # commitment loss weight (auxiliary, lightweight)
+STMM_CODEBOOK_SIZE = 16     # fewer codes = each gets more usage
+STMM_EMA_DECAY = 0.95       # faster adaptation (was 0.99, too sticky)
+STMM_COMMIT_COST = 0.5      # stronger commitment (was 0.25)
 
 BATCH_SIZE = 4
 GRAD_ACCUM = 8
@@ -323,7 +323,7 @@ class StateTrackingMemory(nn.Module):
         return z_q_st, indices, commit
 
     def _ema_update(self, z, indices):
-        """EMA update of codebook entries (prevents collapse)."""
+        """EMA update of codebook entries with dead code resurrection."""
         with torch.no_grad():
             one_hot = F.one_hot(indices, self.codebook_size).float()  # (B, K)
             counts = one_hot.sum(0)  # (K,)
@@ -338,6 +338,16 @@ class StateTrackingMemory(nn.Module):
             n = self.ema_count.sum()
             counts_smooth = (self.ema_count + 1e-5) / (n + self.codebook_size * 1e-5) * n
             self.codebook.data.copy_(self.ema_weight / counts_smooth.unsqueeze(1).clamp(min=1))
+
+            # Dead code resurrection: reinitialize unused codes with random current vectors
+            dead = self.ema_count < 0.1
+            if dead.any() and z.shape[0] > 0:
+                n_dead = dead.sum().item()
+                # Sample from current batch to replace dead codes
+                reinit = z[torch.randint(0, z.shape[0], (n_dead,))]
+                self.codebook.data[dead] = reinit + torch.randn_like(reinit) * 0.01
+                self.ema_weight[dead] = self.codebook.data[dead]
+                self.ema_count[dead] = 1.0
 
     def forward(self, h, tag_positions, char_tag_id, set_tag_id, tag_ids_set):
         """
