@@ -377,6 +377,15 @@ class StateTrackingMemory(nn.Module):
             h_tag = h[batch_idx, seq_pos].unsqueeze(0)  # (1, D)
 
             if token_id in init_tags:
+                # Initialize new entity slot
+                slot = active_entity[batch_idx] % self.max_entities
+                entity_states[batch_idx, slot] = h_tag.squeeze(0)
+                active_entity[batch_idx] += 1
+
+                # Quantize the initial state
+                z_q, idx, commit = self.quantize(h_tag)
+                entity_states[batch_idx, slot] = z_q.squeeze(0)
+                total_commit += commit
                 n_updates += 1
             else:
                 # Other tag: update the most recent entity
