@@ -339,7 +339,7 @@ class StateTrackingMemory(nn.Module):
             counts_smooth = (self.ema_count + 1e-5) / (n + self.codebook_size * 1e-5) * n
             self.codebook.data.copy_(self.ema_weight / counts_smooth.unsqueeze(1).clamp(min=1))
 
-    def forward(self, h, tag_positions, char_tag_id, tag_ids_set):
+    def forward(self, h, tag_positions, char_tag_id, set_tag_id, tag_ids_set):
         """
         Process tag positions and update entity states.
 
@@ -347,6 +347,7 @@ class StateTrackingMemory(nn.Module):
             h: hidden states (B, T, D)
             tag_positions: list of (batch_idx, seq_pos, token_id) for each tag in the sequence
             char_tag_id: token ID for [CHAR] tag
+            set_tag_id: token ID for [SET] tag (also initializes entity)
             tag_ids_set: set of all tag token IDs
 
         Returns:
@@ -368,20 +369,14 @@ class StateTrackingMemory(nn.Module):
         total_commit = 0.0
         n_updates = 0
 
+        # Init tags: [SET] or [CHAR] both create entity slots
+        init_tags = {t for t in [char_tag_id, set_tag_id] if t >= 0}
+
         for batch_idx, seq_pos, token_id in tag_positions:
             # Get the hidden state at this tag position
             h_tag = h[batch_idx, seq_pos].unsqueeze(0)  # (1, D)
 
-            if token_id == char_tag_id:
-                # [CHAR] tag: initialize new entity slot
-                slot = active_entity[batch_idx] % self.max_entities
-                entity_states[batch_idx, slot] = h_tag.squeeze(0)
-                active_entity[batch_idx] += 1
-
-                # Quantize the initial state
-                z_q, idx, commit = self.quantize(h_tag)
-                entity_states[batch_idx, slot] = z_q.squeeze(0)
-                total_commit += commit
+            if token_id in init_tags:
                 n_updates += 1
             else:
                 # Other tag: update the most recent entity
@@ -466,6 +461,7 @@ class CortexVIII_STMM(nn.Module):
         # STMM: compute entity state injection (applied once, before blocks)
         stmm_injection, commit_loss = self.stmm(h, tag_positions,
                                                  self.tag_ids.get("[CHAR]", -1),
+                                                 self.tag_ids.get("[SET]", -1),
                                                  self.tag_ids_set)
 
         # Apply STMM injection at tag positions
@@ -507,6 +503,7 @@ class CortexVIII_STMM(nn.Module):
             # STMM forward
             stmm_injection, _ = self.stmm(h, tag_positions,
                                            tag_ids.get("[CHAR]", -1),
+                                           tag_ids.get("[SET]", -1),
                                            set(tag_ids.values()))
             h = h + stmm_injection
 
