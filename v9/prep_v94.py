@@ -661,23 +661,24 @@ def train_tokenizer_and_pack(all_text):
         tag_ids[tag] = tokenizer.encode(tag).ids[0]
     print(f"  Tag token IDs: {tag_ids}")
 
-    # Encode all stories
-    all_ids = []
+    # Encode stories as separate token sequences
+    eos_id = tokenizer.encode("<eos>").ids[0]
+    stories_as_ids = []
     for story in all_text:
         ids = tokenizer.encode(story).ids
-        all_ids.extend(ids)
-        all_ids.append(tokenizer.encode("<eos>").ids[0])
+        ids.append(eos_id)
+        stories_as_ids.append(ids)
 
-    total_tokens = len(all_ids)
+    total_tokens = sum(len(ids) for ids in stories_as_ids)
     print(f"  Total tokens: {total_tokens:,}")
 
-    # Split 95/5 train/val
+    # Shuffle stories (not tokens!) then split 95/5
     rng = random.Random(42)
-    rng.shuffle(all_ids)
-    split = int(len(all_ids) * 0.95)
+    rng.shuffle(stories_as_ids)
+    split = int(len(stories_as_ids) * 0.95)
 
-    train_ids = np.array(all_ids[:split], dtype=np.uint16)
-    val_ids = np.array(all_ids[split:], dtype=np.uint16)
+    train_ids = np.array([t for ids in stories_as_ids[:split] for t in ids], dtype=np.uint16)
+    val_ids = np.array([t for ids in stories_as_ids[split:] for t in ids], dtype=np.uint16)
     train_ids.tofile(str(train_bin))
     val_ids.tofile(str(val_bin))
 
