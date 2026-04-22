@@ -342,71 +342,52 @@ class StateTrackingMemory(nn.Module):
     def forward(self, h, tag_positions, char_tag_id, set_tag_id, tag_ids_set):
         """
         Process tag positions and update entity states.
-
-        Args:
-            h: hidden states (B, T, D)
-            tag_positions: list of (batch_idx, seq_pos, token_id) for each tag in the sequence
-            char_tag_id: token ID for [CHAR] tag
-            set_tag_id: token ID for [SET] tag (also initializes entity)
-            tag_ids_set: set of all tag token IDs
-
-        Returns:
-            injection: (B, T, D) — state injection to add to hidden states
-            commit_loss: scalar commitment loss
+        Uses lists to avoid inplace operations that break autograd.
         """
         B, T, D = h.shape
         device = h.device
 
-        # Entity state buffer: (B, max_entities, D)
-        entity_states = torch.zeros(B, self.max_entities, D, device=device)
-        active_entity = torch.zeros(B, dtype=torch.long, device=device)  # which slot to use
-
-        injection = torch.zeros(B, T, D, device=device)
-
         if not tag_positions:
-            return injection, torch.tensor(0.0, device=device)
+            return torch.zeros(B, T, D, device=device), torch.tensor(0.0, device=device)
+
+        # Track entity states per batch item as lists (avoid inplace on tensors)
+        # entity_slots[b] = list of (quantized_state_tensor,)
+        entity_slots = [[] for _ in range(B)]
+        init_tags = {t for t in [char_tag_id, set_tag_id] if t >= 0}
 
         total_commit = 0.0
         n_updates = 0
-
-        # Init tags: [SET] or [CHAR] both create entity slots
-        init_tags = {t for t in [char_tag_id, set_tag_id] if t >= 0}
+        injections = []  # list of (batch_idx, seq_pos, projected_state)
 
         for batch_idx, seq_pos, token_id in tag_positions:
-            # Get the hidden state at this tag position
             h_tag = h[batch_idx, seq_pos].unsqueeze(0)  # (1, D)
 
             if token_id in init_tags:
                 # Initialize new entity slot
-                slot = active_entity[batch_idx] % self.max_entities
-                entity_states[batch_idx, slot] = h_tag.squeeze(0)
-                active_entity[batch_idx] += 1
-
-                # Quantize the initial state
                 z_q, idx, commit = self.quantize(h_tag)
-                entity_states[batch_idx, slot] = z_q.squeeze(0)
+                entity_slots[batch_idx].append(z_q.squeeze(0))
                 total_commit += commit
                 n_updates += 1
             else:
-                # Other tag: update the most recent entity
-                if active_entity[batch_idx] > 0:
-                    slot = (active_entity[batch_idx] - 1) % self.max_entities
-                    current_state = entity_states[batch_idx, slot].unsqueeze(0)  # (1, D)
-
-                    # GRU update: state = GRU(state, context)
-                    new_state = self.gru(h_tag, current_state)  # (1, D)
-
-                    # Quantize
+                # Update most recent entity via GRU
+                if entity_slots[batch_idx]:
+                    current = entity_slots[batch_idx][-1].unsqueeze(0)  # (1, D)
+                    new_state = self.gru(h_tag, current)  # (1, D)
                     z_q, idx, commit = self.quantize(new_state)
-                    entity_states[batch_idx, slot] = z_q.squeeze(0)
+                    entity_slots[batch_idx][-1] = z_q.squeeze(0)
                     total_commit += commit
                     n_updates += 1
 
-            # Inject current entity state into this position
-            if active_entity[batch_idx] > 0:
-                slot = (active_entity[batch_idx] - 1) % self.max_entities
-                state_vec = entity_states[batch_idx, slot]  # (D,)
-                injection[batch_idx, seq_pos] = self.inject_proj(state_vec)
+            # Record injection
+            if entity_slots[batch_idx]:
+                state_vec = entity_slots[batch_idx][-1]  # (D,)
+                injections.append((batch_idx, seq_pos, self.inject_proj(state_vec)))
+
+        # Build injection tensor (non-inplace)
+        injection = torch.zeros(B, T, D, device=device)
+        for batch_idx, seq_pos, proj in injections:
+            injection = injection.clone()
+            injection[batch_idx, seq_pos] = proj
 
         avg_commit = total_commit / max(n_updates, 1)
         self.commit_loss = avg_commit
