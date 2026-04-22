@@ -28,15 +28,15 @@ DATA_DIR = SCRIPT_DIR / 'data'
 OUT_DIR = SCRIPT_DIR / 'data_v94'
 
 # API config
-NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NIM_MODEL = "moonshotai/kimi-k2.5"
+NIM_URL = "https://integrate.api.nvidia.com/v1"  # OpenAI client appends /chat/completions
+NIM_MODEL = "meta/llama-3.3-70b-instruct"
 RATE_LIMIT_RPM = 40
-API_TIMEOUT = 60
+API_TIMEOUT = 120
 
 # Generation config
-N_BATCHES = 20          # batches for story generation
-STORIES_PER_BATCH = 100 # stories per API call
-# Total: 20 * 100 = 2,000 stories target
+N_BATCHES = 1000        # batches for story generation
+STORIES_PER_BATCH = 10  # stories per API call
+# Total: 1000 * 5 = 5000 stories target
 
 # SIA tags
 TAG_TOKENS = ["[SET]", "[CHAR]", "[ACT]", "[DIAL]", "[FEEL]", "[EVENT]", "[RES]", "[DESC]"]
@@ -87,38 +87,46 @@ OBJECTS = [
 # ============================================================================
 # API CLIENT
 # ============================================================================
+def get_client(api_key):
+    import httpx
+    from openai import OpenAI
+    return OpenAI(base_url=NIM_URL, api_key=api_key, timeout=httpx.Timeout(API_TIMEOUT, connect=10))
+
+
 def call_nim(prompt, api_key, temperature=0.8, max_tokens=4096, retries=3):
-    """Call Nvidia NIM API with retry logic."""
-    import requests
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": NIM_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "top_p": 1.0,
-    }
-
+    """Call Nvidia NIM API with streaming to avoid reasoning field issues."""
+    client = get_client(api_key)
     for attempt in range(retries):
         try:
-            resp = requests.post(NIM_URL, headers=headers, json=payload, timeout=API_TIMEOUT)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["choices"][0]["message"]["content"].strip()
-            elif resp.status_code == 429:
+            completion = client.chat.completions.create(
+                model=NIM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                top_p=0.95,
+                max_tokens=max_tokens,
+                stream=True,
+                stream_options={"include_usage": False},
+            )
+            chunks = []
+            for chunk in completion:
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content is not None:
+                    chunks.append(delta.content)
+            text = "".join(chunks).strip()
+            if text:
+                return text
+            print(f"    Empty stream from API")
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "rate" in err.lower():
                 wait = min(60, 5 * (attempt + 1))
                 print(f"    Rate limited, waiting {wait}s...")
                 time.sleep(wait)
             else:
-                print(f"    API error {resp.status_code}: {resp.text[:200]}")
+                print(f"    Request failed: {err[:150]}")
                 time.sleep(2)
-        except Exception as e:
-            print(f"    Request failed: {e}")
-            time.sleep(2)
     return None
 
 
@@ -162,13 +170,11 @@ def parse_stories(text):
     if not text:
         return []
     stories = []
-    # Split by numbered patterns like "1." "1)" "Story 1:"
     parts = re.split(r'\n\s*\d+[\.\)]\s*', text)
     for part in parts:
         part = part.strip()
         if not part:
             continue
-        # Clean up any remaining numbering
         part = re.sub(r'^\d+[\.\)]\s*', '', part).strip()
         if len(part) > 30 and '.' in part:
             stories.append(part)
@@ -176,24 +182,39 @@ def parse_stories(text):
 
 
 def generate_stories(api_key, n_batches=N_BATCHES, per_batch=STORIES_PER_BATCH):
-    """Phase A: Generate stories via API."""
+    """Phase A: Generate stories via API. Saves incrementally."""
     print(f"\n{'='*60}")
-    print(f"Phase A: Generating stories ({n_batches} batches × {per_batch} stories)")
+    print(f"Phase A: Generating stories ({n_batches} batches x {per_batch} stories)")
     print(f"{'='*60}")
 
-    all_stories = []
-    prompt = STORY_GEN_PROMPT.format(n=per_batch)
+    cache_path = OUT_DIR / 'raw_stories.json'
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for batch_i in range(n_batches):
-        print(f"  Batch {batch_i+1}/{n_batches}...")
-        result = call_nim(prompt, api_key, temperature=0.85, max_tokens=16384)
+    # Load existing cache if any
+    all_stories = []
+    if cache_path.exists():
+        with open(cache_path) as f:
+            all_stories = json.load(f)
+        print(f"  Loaded {len(all_stories)} cached stories")
+
+    prompt = STORY_GEN_PROMPT.format(n=per_batch)
+    start_batch = len(all_stories) // per_batch  # skip already-done batches
+
+    for batch_i in range(start_batch, n_batches):
+        t0 = time.time()
+        result = call_nim(prompt, api_key, temperature=0.85, max_tokens=4096)
         stories = parse_stories(result)
         all_stories.extend(stories)
-        print(f"    Got {len(stories)} stories (total: {len(all_stories)})")
+        if (batch_i + 1) % 20 == 0:
+            print(f"  Batch {batch_i+1}/{n_batches}: {len(all_stories)} stories so far")
 
-        # Rate limit
+        # Save incrementally
+        with open(cache_path, 'w') as f:
+            json.dump(all_stories, f, indent=2)
+
+        # Rate limit (only if API was faster than RPM interval)
         if batch_i < n_batches - 1:
-            time.sleep(60.0 / RATE_LIMIT_RPM)
+            time.sleep(max(0, 60.0 / RATE_LIMIT_RPM - (time.time() - t0)))
 
     print(f"  Phase A complete: {len(all_stories)} stories generated")
     return all_stories
@@ -254,10 +275,20 @@ def linearize_stories(api_key, stories, batch_size=5):
     print(f"Phase B: Multi-linearizing {len(stories)} stories")
     print(f"{'='*60}")
 
+    cache_path = OUT_DIR / 'linearized_stories.json'
     all_variants = []
+    start_batch = 0
+
+    # Resume from cache
+    if cache_path.exists():
+        with open(cache_path) as f:
+            all_variants = json.load(f)
+        start_batch = len(all_variants) // (batch_size * 3)  # 3 variants per story per batch
+        print(f"  Resuming from batch {start_batch}, {len(all_variants)} cached variants")
+
     n_batches = (len(stories) + batch_size - 1) // batch_size
 
-    for batch_i in range(n_batches):
+    for batch_i in range(start_batch, n_batches):
         start = batch_i * batch_size
         end = min(start + batch_size, len(stories))
         batch = stories[start:end]
@@ -275,6 +306,10 @@ def linearize_stories(api_key, stories, batch_size=5):
         result = call_nim(prompt, api_key, temperature=0.8, max_tokens=8192)
         variants = parse_linearizations(result, len(batch))
         all_variants.extend(variants)
+
+        # Save incrementally
+        with open(cache_path, 'w') as f:
+            json.dump(all_variants, f, indent=2)
 
         if (batch_i + 1) % 10 == 0:
             print(f"  Progress: {batch_i+1}/{n_batches} batches, {len(all_variants)} variants")
@@ -504,6 +539,8 @@ def process_stories(stories):
     tagged = []
     tag_counts = Counter()
 
+    N_PERMUTATIONS = 3  # 1 original + 3 permutations = 4x
+
     for story in stories:
         # Original tagged
         t = tag_story(story)
@@ -511,10 +548,11 @@ def process_stories(stories):
         for tag in TAG_TOKENS:
             tag_counts[tag] += t.count(tag)
 
-        # Permuted variant tagged
-        perm = permute_story(story, rng)
-        t2 = tag_story(perm)
-        tagged.append(t2)
+        # Permuted variants tagged
+        for _ in range(N_PERMUTATIONS):
+            perm = permute_story(story, rng)
+            t2 = tag_story(perm)
+            tagged.append(t2)
 
     print(f"  {len(tagged)} tagged story instances")
     print(f"  Tag distribution: {dict(tag_counts)}")
@@ -688,6 +726,16 @@ def main():
                         help='Skip multi-linearization step')
     args = parser.parse_args()
 
+    # Load .env file if it exists
+    env_path = Path(__file__).resolve().parent.parent / '.env'
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+
     api_key = args.api_key or os.environ.get('NVIDIA_API_KEY')
     if not api_key and not args.skip_generation:
         print("ERROR: Set NVIDIA_API_KEY env var or pass --api-key")
@@ -718,18 +766,26 @@ def main():
     # Phase B: Multi-linearize
     if args.skip_linearize and cached_linear_path.exists():
         with open(cached_linear_path) as f:
-            all_stories = json.load(f)
-        print(f"Loaded {len(all_stories)} cached linearized stories")
+            cached_linear = json.load(f)
+        print(f"Loaded {len(cached_linear)} cached linearized variants")
+        all_stories = stories + cached_linear
     else:
         variants = linearize_stories(api_key, stories)
         # Combine originals + variants
         all_stories = stories + variants
         with open(cached_linear_path, 'w') as f:
-            json.dump(all_stories, f, indent=2)
-        print(f"Saved {len(all_stories)} stories (orig+variants)")
+            json.dump(variants, f, indent=2)
+        print(f"Saved {len(variants)} variants to {cached_linear_path}")
+    print(f"Total: {len(all_stories)} stories (orig + variants)")
 
-    # Phase C: Verify + regenerate
-    verified = verify_and_regen(all_stories, api_key)
+    # Phase C: Verify (deterministic only, no API regeneration)
+    verifier = StoryVerifier()
+    verified = []
+    for story in all_stories:
+        passed, reason = verifier.verify(story)
+        if passed:
+            verified.append(story)
+    print(f"Verified: {len(verified)}/{len(all_stories)} passed")
 
     # Save verified
     verified_path = OUT_DIR / 'verified_stories.json'
