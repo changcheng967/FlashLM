@@ -118,7 +118,23 @@ def load_data():
         sys.exit(1)
 
     from tokenizers import Tokenizer
-    tokenizer = Tokenizer.from_file(str(tok_path))
+    try:
+        tokenizer = Tokenizer.from_file(str(tok_path))
+    except Exception:
+        # Version mismatch — reconstruct from saved BPE vocab/merges
+        from tokenizers.models import BPE
+        import json as _json
+        with open(tok_path) as f:
+            tok_data = _json.load(f)
+        model_data = tok_data['model']
+        vocab = model_data.get('vocab', {})
+        merges = model_data.get('merges', [])
+        tokenizer = Tokenizer(BPE(vocab=vocab, merges=merges))
+        # Re-add special tokens
+        added = tok_data.get('added_tokens', [])
+        from tokenizers import AddedToken
+        for at in added:
+            tokenizer.add_special_tokens([AddedToken(at['content'])])
     vocab = tokenizer.get_vocab_size()
 
     with open(meta_path) as f:
