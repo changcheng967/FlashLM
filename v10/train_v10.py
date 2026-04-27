@@ -358,7 +358,7 @@ class DualGatedRecurrence(nn.Module):
 
         # Merge
         self.merge = nn.Linear(2 * total_dim, d_model, bias=False)
-        self.norm = RMSNorm(total_dim)
+        self.norm = RMSNorm(d_model)
 
         nn.init.normal_(self.fast_out_gate.weight, std=0.02)
         nn.init.normal_(self.slow_out_gate.weight, std=0.02)
