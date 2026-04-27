@@ -47,10 +47,10 @@ VOCAB_SIZE = 4096
 D_MODEL = 256
 D_FF = 768          # 3x d_model (SwiGLU split)
 N_HEADS = 4
-D_HEAD = 64
-SEQ_LEN = 256
+D_HEAD = 32         # smaller heads = faster recurrence scan
+SEQ_LEN = 128       # shorter sequences = faster scan
 N_UNIQUE = 3        # unique VortexBlocks
-N_RECURSE = 4       # recursions per unique block = 12 effective layers
+N_RECURSE = 2       # recursions per unique block = 6 effective layers
 
 BATCH_SIZE = 4
 GRAD_ACCUM = 8
@@ -364,19 +364,16 @@ class DualGatedRecurrence(nn.Module):
         nn.init.normal_(self.slow_out_gate.weight, std=0.02)
         nn.init.normal_(self.merge.weight, std=0.02)
 
-    def _parallel_scan(self, forget, value):
-        """Vectorized linear recurrence: h_t = f_t * h_{t-1} + (1-f_t) * v_t.
-        Uses log-space cumulative product for numerical stability."""
-        # forget: (B, T, D), value: (B, T, D)
-        # h_t = cumprod(f) * cumsum(v * (1-f) / cumprod(f))
-        log_f = torch.log(forget.clamp(min=1e-7))
-        log_cum_f = torch.cumsum(log_f, dim=1)  # (B, T, D)
-        cum_f = torch.exp(log_cum_f)  # cumulative product of forget gates
-
-        # (1-f)*v normalized by cumulative forget, then cumsum, then rescale
-        v_scaled = (1 - forget) * value / cum_f
-        h_cum = torch.cumsum(v_scaled, dim=1)
-        return cum_f * h_cum
+    def _sequential_scan(self, forget, value):
+        """Sequential linear recurrence: h_t = f_t * h_{t-1} + (1-f_t) * v_t.
+        Simple, stable, fast enough for T=256 on CPU."""
+        B, T, D = value.shape
+        h = torch.zeros(B, D, device=value.device, dtype=value.dtype)
+        outputs = []
+        for t in range(T):
+            h = forget[:, t] * h + (1 - forget[:, t]) * value[:, t]
+            outputs.append(h.clone())
+        return torch.stack(outputs, dim=1)
 
     def forward(self, x):
         B, T, D = x.shape
@@ -385,14 +382,14 @@ class DualGatedRecurrence(nn.Module):
         f_gate = torch.sigmoid(self.fast_gate_w(x) + 0.5)  # +0.5 bias toward forgetting
         f_forget = self.gate_lb_fast + (1 - self.gate_lb_fast) * f_gate
         f_val = self.fast_val_w(x)
-        fast_h = self._parallel_scan(f_forget, f_val)
+        fast_h = self._sequential_scan(f_forget, f_val)
         fast_out = torch.sigmoid(self.fast_out_gate(x)) * fast_h
 
         # Slow stream
         s_gate = torch.sigmoid(self.slow_gate_w(x) + 0.5)
         s_forget = self.gate_lb_slow + (1 - self.gate_lb_slow) * s_gate
         s_val = self.slow_val_w(x)
-        slow_h = self._parallel_scan(s_forget, s_val)
+        slow_h = self._sequential_scan(s_forget, s_val)
         slow_out = torch.sigmoid(self.slow_out_gate(x)) * slow_h
 
         # Merge
