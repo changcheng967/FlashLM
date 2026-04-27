@@ -393,7 +393,7 @@ class DualGatedRecurrence(nn.Module):
 
         # Merge
         merged = torch.cat([fast_out, slow_out], dim=-1)
-        return self.merge(self.norm(merged))
+        return self.norm(self.merge(merged))
 
 
 class TokenShift(nn.Module):
