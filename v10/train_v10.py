@@ -126,43 +126,65 @@ def prepare_data(force=False):
 
     eos_id = tokenizer.encode("<eos>").ids[0]
 
-    # Encode in large batches — fast with tokenizers library
-    def encode_file_fast(filepath):
+    # Streaming encode: write token IDs to disk in chunks, don't accumulate in RAM
+    def encode_file_streaming(filepath, out_path):
         print(f"  Encoding {filepath.name}...")
-        all_ids = []
+        total_tokens = 0
         batch = []
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.strip()
-                if not line or len(line) < 20:
-                    continue
-                batch.append(line)
-                if len(batch) >= 10000:
-                    encodings = tokenizer.encode_batch(batch)
-                    for enc in encodings:
-                        all_ids.extend(enc.ids)
-                        all_ids.append(eos_id)
-                    batch = []
-        if batch:
-            encodings = tokenizer.encode_batch(batch)
-            for enc in encodings:
-                all_ids.extend(enc.ids)
-                all_ids.append(eos_id)
-        return np.array(all_ids, dtype=np.uint16)
+        chunk_ids = []
+        with open(out_path, 'wb') as out_f:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or len(line) < 20:
+                        continue
+                    batch.append(line)
+                    if len(batch) >= 5000:
+                        encodings = tokenizer.encode_batch(batch)
+                        for enc in encodings:
+                            chunk_ids.extend(enc.ids)
+                            chunk_ids.append(eos_id)
+                        batch = []
+                    # Flush to disk every ~500K tokens
+                    if len(chunk_ids) > 500000:
+                        arr = np.array(chunk_ids, dtype=np.uint16)
+                        arr.tofile(out_f)
+                        total_tokens += len(chunk_ids)
+                        chunk_ids = []
+            # Remaining batch
+            if batch:
+                encodings = tokenizer.encode_batch(batch)
+                for enc in encodings:
+                    chunk_ids.extend(enc.ids)
+                    chunk_ids.append(eos_id)
+            if chunk_ids:
+                arr = np.array(chunk_ids, dtype=np.uint16)
+                arr.tofile(out_f)
+                total_tokens += len(chunk_ids)
+        print(f"    {filepath.name}: {total_tokens:,} tokens")
+        return total_tokens
 
-    train_ids = encode_file_fast(train_txt)
-    print(f"  Train: {len(train_ids):,} tokens")
+    # Encode val first (small)
+    n_val = encode_file_streaming(val_txt, val_bin)
 
-    val_ids = encode_file_fast(val_txt)
-    print(f"  Val: {len(val_ids):,} tokens")
+    # Encode train — write to temp, then shuffle chunks
+    train_tmp = data_dir / 'train_unshuffled.bin'
+    n_train = encode_file_streaming(train_txt, train_tmp)
 
-    # Shuffle train tokens in chunks of SEQ_LEN for randomness
-    n_train = (len(train_ids) // SEQ_LEN) * SEQ_LEN
-    train_ids = train_ids[:n_train]
-    n_chunks = len(train_ids) // SEQ_LEN
+    # Shuffle train in chunks of SEQ_LEN
+    print(f"  Shuffling train data...")
+    train_data = np.fromfile(str(train_tmp), dtype=np.uint16)
+    n_chunks = len(train_data) // SEQ_LEN
+    train_data = train_data[:n_chunks * SEQ_LEN]
     rng = np.random.RandomState(42)
     perm = rng.permutation(n_chunks)
-    train_ids = train_ids.reshape(n_chunks, SEQ_LEN)[perm].reshape(-1)
+    train_data = train_data.reshape(n_chunks, SEQ_LEN)[perm].reshape(-1)
+    train_data.tofile(str(train_bin))
+    train_tmp.unlink(missing_ok=True)
+
+    # Count val tokens from file
+    val_data = np.fromfile(str(val_bin), dtype=np.uint16)
+    n_val = len(val_data)
 
     train_ids.tofile(str(train_bin))
     val_ids.tofile(str(val_bin))
