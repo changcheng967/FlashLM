@@ -109,85 +109,77 @@ def prepare_data(force=False):
                 print(f"  ERROR: {e}")
                 sys.exit(1)
 
-    # Load and filter stories
-    print(f"  Loading stories...")
-    train_stories, val_stories = [], []
-    for path, target in [(train_txt, train_stories), (val_txt, val_stories)]:
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                n_sents = len(re.findall(r'[.!?]', line))
-                if 3 <= n_sents <= 12 and len(line) > 40:
-                    target.append(line)
-        print(f"  {path.name}: {len(target):,} stories (filtered)")
-
-    all_stories = train_stories + val_stories
-
-    # Train BPE tokenizer
+    # Train BPE tokenizer on raw text files (fast)
     print(f"  Training BPE tokenizer (vocab={VOCAB_SIZE})...")
     from tokenizers import Tokenizer
     from tokenizers.models import BPE
     from tokenizers.trainers import BpeTrainer
     from tokenizers.pre_tokenizers import ByteLevel
 
-    stories_file = data_dir / 'all_stories.txt'
-    with open(stories_file, 'w', encoding='utf-8') as f:
-        for s in all_stories:
-            f.write(s + '\n\n')
-
     special = ["<pad>", "<unk>", "<bos>", "<eos>"]
     tokenizer = Tokenizer(BPE())
     tokenizer.pre_tokenizer = ByteLevel()
-    tokenizer.train(files=[str(stories_file)], trainer=BpeTrainer(
+    # Train on train file directly — much faster than creating temp file
+    tokenizer.train(files=[str(train_txt)], trainer=BpeTrainer(
         vocab_size=VOCAB_SIZE, min_frequency=3, special_tokens=special))
     tokenizer.save(str(tok_path))
 
     eos_id = tokenizer.encode("<eos>").ids[0]
 
-    # Encode and pack
-    print(f"  Encoding {len(all_stories):,} stories...")
-    rng = random.Random(42)
+    # Encode in large batches — fast with tokenizers library
+    def encode_file_fast(filepath):
+        print(f"  Encoding {filepath.name}...")
+        all_ids = []
+        batch = []
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line or len(line) < 20:
+                    continue
+                batch.append(line)
+                if len(batch) >= 10000:
+                    encodings = tokenizer.encode_batch(batch)
+                    for enc in encodings:
+                        all_ids.extend(enc.ids)
+                        all_ids.append(eos_id)
+                    batch = []
+        if batch:
+            encodings = tokenizer.encode_batch(batch)
+            for enc in encodings:
+                all_ids.extend(enc.ids)
+                all_ids.append(eos_id)
+        return np.array(all_ids, dtype=np.uint16)
 
-    train_ids_list = []
-    for s in train_stories:
-        ids = tokenizer.encode(s).ids
-        ids.append(eos_id)
-        train_ids_list.append(ids)
-    rng.shuffle(train_ids_list)
+    train_ids = encode_file_fast(train_txt)
+    print(f"  Train: {len(train_ids):,} tokens")
 
-    val_ids_list = []
-    for s in val_stories:
-        ids = tokenizer.encode(s).ids
-        ids.append(eos_id)
-        val_ids_list.append(ids)
+    val_ids = encode_file_fast(val_txt)
+    print(f"  Val: {len(val_ids):,} tokens")
 
-    train_flat = np.array([t for ids in train_ids_list for t in ids], dtype=np.uint16)
-    val_flat = np.array([t for ids in val_ids_list for t in ids], dtype=np.uint16)
-    train_flat.tofile(str(train_bin))
-    val_flat.tofile(str(val_bin))
+    # Shuffle train tokens in chunks of SEQ_LEN for randomness
+    n_train = (len(train_ids) // SEQ_LEN) * SEQ_LEN
+    train_ids = train_ids[:n_train]
+    n_chunks = len(train_ids) // SEQ_LEN
+    rng = np.random.RandomState(42)
+    perm = rng.permutation(n_chunks)
+    train_ids = train_ids.reshape(n_chunks, SEQ_LEN)[perm].reshape(-1)
+
+    train_ids.tofile(str(train_bin))
+    val_ids.tofile(str(val_bin))
 
     meta = {
         'vocab': tokenizer.get_vocab_size(),
-        'n_train_stories': len(train_stories),
-        'n_val_stories': len(val_stories),
-        'train_tokens': len(train_flat),
-        'val_tokens': len(val_flat),
+        'train_tokens': len(train_ids),
+        'val_tokens': len(val_ids),
     }
     with open(meta_path, 'w') as f:
         json.dump(meta, f, indent=2)
 
     # Vocab diversity stats
-    tc = Counter(train_flat.tolist())
+    tc = Counter(train_ids.tolist())
     sc = sorted(tc.values(), reverse=True)
-    print(f"  Train: {len(train_flat):,} tokens | Val: {len(val_flat):,} tokens")
-    print(f"  Top 10 tokens: {100*sum(sc[:10])/len(train_flat):.1f}% | Top 50: {100*sum(sc[:50])/len(train_flat):.1f}%")
+    print(f"  Top 10 tokens: {100*sum(sc[:10])/len(train_ids):.1f}% | Top 50: {100*sum(sc[:50])/len(train_ids):.1f}%")
     print(f"  Unique tokens: {len(tc)}/{tokenizer.get_vocab_size()}")
-
-    # Cleanup temp file
-    stories_file.unlink(missing_ok=True)
-
     print(f"  Data preparation complete.")
     return meta
 
