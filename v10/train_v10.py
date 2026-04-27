@@ -329,85 +329,91 @@ class HadamardProj(nn.Module):
         return h
 
 
-class DualGatedRecurrence(nn.Module):
+class DualExpMemory(nn.Module):
     """
-    Two parallel gated linear recurrence streams:
-    - Fast: low gate_lb → fast decay, captures local patterns
-    - Slow: high gate_lb → slow decay, captures global context
+    Two parallel exponential decay memory streams — ZERO Python loops.
+    - Fast: high decay per head → short context, local patterns
+    - Slow: low decay per head → long context, global patterns
 
-    h_t = gate_t * h_{t-1} + (1 - gate_t) * value_t
-    All projections use BitLinear (ternary, single tensor op).
-    Scan uses vectorized chunked cumsum — no Python loop.
+    h_t = sum_{i=0}^{t} v_i * alpha^(t-i)  where alpha = per-head forget factor
+    Fully vectorized via cumsum — no sequential scan needed.
     """
-    def __init__(self, d_model, n_heads, d_head, gate_lb_fast=0.0, gate_lb_slow=0.85):
+    def __init__(self, d_model, n_heads, d_head, fast_decay=3.0, slow_decay=0.3):
         super().__init__()
         self.n_heads = n_heads
         self.d_head = d_head
         total_dim = n_heads * d_head
 
-        # Fast stream — BitLinear for speed
-        self.fast_gate_w = BitLinear(d_model, total_dim)
-        self.fast_val_w = BitLinear(d_model, total_dim)
-        self.fast_out_gate = BitLinear(d_model, total_dim)
-        self.gate_lb_fast = gate_lb_fast
+        # Per-head forget factors (learned, log-space)
+        self.fast_decay_log = nn.Parameter(torch.full((n_heads,), math.log(fast_decay)))
+        self.slow_decay_log = nn.Parameter(torch.full((n_heads,), math.log(slow_decay)))
+
+        # Fast stream
+        self.fast_val = BitLinear(d_model, total_dim)
+        self.fast_gate = BitLinear(d_model, total_dim)
 
         # Slow stream
-        self.slow_gate_w = BitLinear(d_model, total_dim)
-        self.slow_val_w = BitLinear(d_model, total_dim)
-        self.slow_out_gate = BitLinear(d_model, total_dim)
-        self.gate_lb_slow = gate_lb_slow
+        self.slow_val = BitLinear(d_model, total_dim)
+        self.slow_gate = BitLinear(d_model, total_dim)
 
         # Merge
         self.merge = nn.Linear(2 * total_dim, d_model, bias=False)
         self.norm = RMSNorm(d_model)
-
         nn.init.normal_(self.merge.weight, std=0.02)
 
-    def _vectorized_scan(self, forget, value):
-        """Vectorized linear recurrence using chunked cumsum.
-        h_t = f_t * h_{t-1} + a_t  where a_t = (1-f_t) * v_t
-        Solved as: h = cumprod(f) * cumsum(a / cumprod(f))
-        Chunked for numerical stability (chunk_size=16, f clamped to [0.1, 0.95]).
+    def _exp_memory(self, value, decay_log, T):
+        """Fully vectorized exponential decay memory. Zero Python loops.
+        h_t = sum_{i=0}^{t} v_i * alpha^(t-i), alpha = per-head forget factor.
+        Uses log-space cumsum with max-subtraction for stability.
         """
-        B, T, D = value.shape
-        CHUNK = 16
-        f = forget.clamp(min=0.1, max=0.95)
-        a = (1 - forget) * value
+        B, _, HD = value.shape
+        H, D = self.n_heads, self.d_head
+        v = value.view(B, T, H, D)
 
-        output = torch.empty(B, T, D, device=value.device, dtype=value.dtype)
-        h = torch.zeros(B, D, device=value.device, dtype=value.dtype)
+        gamma = decay_log.exp().clamp(min=0.05, max=5.0)  # (H,)
+        log_alpha = (-gamma).view(1, 1, H, 1)  # log(alpha) per head
 
-        for start in range(0, T, CHUNK):
-            end = min(start + CHUNK, T)
-            cf = f[:, start:end]
-            ca = a[:, start:end]
-            # cumprod within chunk — safe because chunk is small
-            cum_f = torch.cumprod(cf, dim=1)
-            inv_cum_f = torch.reciprocal(cum_f)
-            # Include carry-in h: scale by inv_cum_f at each position
-            h_scaled = h.unsqueeze(1) * inv_cum_f
-            chunk_h = cum_f * (h_scaled + torch.cumsum(ca * inv_cum_f, dim=1))
-            output[:, start:end] = chunk_h
-            h = chunk_h[:, -1]
+        # log_weights[t, i] = (t - i) * log_alpha for i <= t
+        positions = torch.arange(T, device=v.device, dtype=v.dtype)
+        # Distance matrix: dist[t, i] = t - i (only for t >= i)
+        dist = (positions.unsqueeze(0) - positions.unsqueeze(1)).clamp(min=0)  # (T, T)
+        log_w = dist.view(1, T, T, 1) * log_alpha.view(1, 1, 1, H)  # (1, T, T, H)
+        log_w = log_w.permute(0, 1, 3, 2)  # (1, T, H, T) — query by key
 
-        return output
+        # For each position t, compute: h_t = sum_{i<=t} v_i * alpha^{t-i}
+        # This is a matrix multiply! h = weighted_attention(v, v)
+        # But O(T^2) in memory. For T=128 this is fine (128^2 = 16K).
+        # Use log-sum-exp for stability:
+        # h_t[h,d] = sum_i v[i,h,d] * exp(log_w[t,h,i])
+
+        # v: (B, T, H, D), log_w: (1, T, H, T)
+        # weights: (B, T, H, T) — need to softmax over last dim
+        w = torch.exp(log_w - log_w.max(dim=-1, keepdim=True).values)  # stable exp
+        # Causal mask: only i <= t
+        causal = torch.tril(torch.ones(T, T, device=v.device, dtype=v.dtype)).view(1, T, 1, T)
+        w = w * causal
+        w_sum = w.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        w_norm = w / w_sum
+
+        # Weighted sum: h[t,h,d] = sum_i w_norm[t,h,i] * v[i,h,d]
+        # v: (B, T, H, D), w_norm: (B, T, H, T)
+        h = torch.einsum('bthi,bihd->bthd', w_norm, v)
+        return h.reshape(B, T, HD)
 
     def forward(self, x):
         B, T, D = x.shape
 
         # Fast stream
-        f_gate = torch.sigmoid(self.fast_gate_w(x))
-        f_forget = self.gate_lb_fast + (1 - self.gate_lb_fast) * f_gate
-        f_val = self.fast_val_w(x)
-        fast_h = self._vectorized_scan(f_forget, f_val)
-        fast_out = torch.sigmoid(self.fast_out_gate(x)) * fast_h
+        fv = self.fast_val(x)
+        fg = torch.sigmoid(self.fast_gate(x))
+        fast_h = self._exp_memory(fv, self.fast_decay_log, T)
+        fast_out = fg * fast_h
 
         # Slow stream
-        s_gate = torch.sigmoid(self.slow_gate_w(x))
-        s_forget = self.gate_lb_slow + (1 - self.gate_lb_slow) * s_gate
-        s_val = self.slow_val_w(x)
-        slow_h = self._vectorized_scan(s_forget, s_val)
-        slow_out = torch.sigmoid(self.slow_out_gate(x)) * slow_h
+        sv = self.slow_val(x)
+        sg = torch.sigmoid(self.slow_gate(x))
+        slow_h = self._exp_memory(sv, self.slow_decay_log, T)
+        slow_out = sg * slow_h
 
         # Merge
         merged = torch.cat([fast_out, slow_out], dim=-1)
@@ -434,12 +440,12 @@ class VortexBlock(nn.Module):
     with depth embeddings and learned skip gates.
     """
     def __init__(self, d_model, d_ff, n_heads, d_head, block_idx, n_blocks,
-                 gate_lb_fast=0.0, gate_lb_slow=0.85, dropout=0.0):
+                 fast_decay=3.0, slow_decay=0.3, dropout=0.0):
         super().__init__()
         self.ln1 = RMSNorm(d_model)
         self.shift = TokenShift(d_model)
-        self.recurrence = DualGatedRecurrence(
-            d_model, n_heads, d_head, gate_lb_fast, gate_lb_slow)
+        self.recurrence = DualExpMemory(
+            d_model, n_heads, d_head, fast_decay, slow_decay)
         self.drop1 = nn.Dropout(dropout)
 
         self.ln2 = RMSNorm(d_model)
@@ -500,14 +506,13 @@ class VortexModel(nn.Module):
         n_total = n_unique * n_recurse
         self.blocks = nn.ModuleList()
         for i in range(n_unique):
-            # Spread gate_lb across unique blocks
+            # Hierarchical decay: early blocks fast, later blocks slow
             progress = i / max(n_unique - 1, 1)
-            gate_lb_fast = 0.0
-            gate_lb_slow = 0.7 + 0.2 * progress  # 0.7 → 0.9
+            fast_decay = 4.0 - 2.0 * progress   # 4.0 → 2.0 (very fast)
+            slow_decay = 0.8 - 0.5 * progress    # 0.8 → 0.3 (slow → very slow)
             self.blocks.append(VortexBlock(
                 d_model, d_ff, n_heads, d_head, i, n_total,
-                gate_lb_fast=gate_lb_fast,
-                gate_lb_slow=gate_lb_slow,
+                fast_decay=fast_decay, slow_decay=slow_decay,
                 dropout=dropout))
 
         self.ln_out = RMSNorm(d_model)
