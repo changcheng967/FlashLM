@@ -182,25 +182,19 @@ def prepare_data(force=False):
     train_data.tofile(str(train_bin))
     train_tmp.unlink(missing_ok=True)
 
-    # Count val tokens from file
-    val_data = np.fromfile(str(val_bin), dtype=np.uint16)
-    n_val = len(val_data)
-
-    train_ids.tofile(str(train_bin))
-    val_ids.tofile(str(val_bin))
-
     meta = {
         'vocab': tokenizer.get_vocab_size(),
-        'train_tokens': len(train_ids),
-        'val_tokens': len(val_ids),
+        'train_tokens': n_train,
+        'val_tokens': n_val,
     }
     with open(meta_path, 'w') as f:
         json.dump(meta, f, indent=2)
 
-    # Vocab diversity stats
-    tc = Counter(train_ids.tolist())
+    # Vocab diversity stats (sample 1M tokens from train for speed)
+    train_sample = np.fromfile(str(train_bin), dtype=np.uint16, count=min(1000000, n_train))
+    tc = Counter(train_sample.tolist())
     sc = sorted(tc.values(), reverse=True)
-    print(f"  Top 10 tokens: {100*sum(sc[:10])/len(train_ids):.1f}% | Top 50: {100*sum(sc[:50])/len(train_ids):.1f}%")
+    print(f"  Top 10 tokens: {100*sum(sc[:10])/len(train_sample):.1f}% | Top 50: {100*sum(sc[:50])/len(train_sample):.1f}%")
     print(f"  Unique tokens: {len(tc)}/{tokenizer.get_vocab_size()}")
     print(f"  Data preparation complete.")
     return meta
