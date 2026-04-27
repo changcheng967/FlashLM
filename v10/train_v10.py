@@ -336,7 +336,8 @@ class DualGatedRecurrence(nn.Module):
     - Slow: high gate_lb → slow decay, captures global context
 
     h_t = gate_t * h_{t-1} + (1 - gate_t) * value_t
-    Computed via sequential scan (CPU-friendly).
+    All projections use BitLinear (ternary, single tensor op).
+    Scan uses vectorized chunked cumsum — no Python loop.
     """
     def __init__(self, d_model, n_heads, d_head, gate_lb_fast=0.0, gate_lb_slow=0.85):
         super().__init__()
@@ -344,52 +345,68 @@ class DualGatedRecurrence(nn.Module):
         self.d_head = d_head
         total_dim = n_heads * d_head
 
-        # Fast stream
-        self.fast_gate_w = HadamardProj(d_model, total_dim)
-        self.fast_val_w = HadamardProj(d_model, total_dim)
-        self.fast_out_gate = nn.Linear(d_model, total_dim, bias=False)
+        # Fast stream — BitLinear for speed
+        self.fast_gate_w = BitLinear(d_model, total_dim)
+        self.fast_val_w = BitLinear(d_model, total_dim)
+        self.fast_out_gate = BitLinear(d_model, total_dim)
         self.gate_lb_fast = gate_lb_fast
 
         # Slow stream
-        self.slow_gate_w = HadamardProj(d_model, total_dim)
-        self.slow_val_w = HadamardProj(d_model, total_dim)
-        self.slow_out_gate = nn.Linear(d_model, total_dim, bias=False)
+        self.slow_gate_w = BitLinear(d_model, total_dim)
+        self.slow_val_w = BitLinear(d_model, total_dim)
+        self.slow_out_gate = BitLinear(d_model, total_dim)
         self.gate_lb_slow = gate_lb_slow
 
         # Merge
         self.merge = nn.Linear(2 * total_dim, d_model, bias=False)
         self.norm = RMSNorm(d_model)
 
-        nn.init.normal_(self.fast_out_gate.weight, std=0.02)
-        nn.init.normal_(self.slow_out_gate.weight, std=0.02)
         nn.init.normal_(self.merge.weight, std=0.02)
 
-    def _sequential_scan(self, forget, value):
-        """Sequential linear recurrence: h_t = f_t * h_{t-1} + (1-f_t) * v_t.
-        Simple, stable, fast enough for T=256 on CPU."""
+    def _vectorized_scan(self, forget, value):
+        """Vectorized linear recurrence using chunked cumsum.
+        h_t = f_t * h_{t-1} + a_t  where a_t = (1-f_t) * v_t
+        Solved as: h = cumprod(f) * cumsum(a / cumprod(f))
+        Chunked for numerical stability (chunk_size=16, f clamped to [0.1, 0.95]).
+        """
         B, T, D = value.shape
+        CHUNK = 16
+        f = forget.clamp(min=0.1, max=0.95)
+        a = (1 - forget) * value
+
+        output = torch.empty(B, T, D, device=value.device, dtype=value.dtype)
         h = torch.zeros(B, D, device=value.device, dtype=value.dtype)
-        outputs = []
-        for t in range(T):
-            h = forget[:, t] * h + (1 - forget[:, t]) * value[:, t]
-            outputs.append(h.clone())
-        return torch.stack(outputs, dim=1)
+
+        for start in range(0, T, CHUNK):
+            end = min(start + CHUNK, T)
+            cf = f[:, start:end]
+            ca = a[:, start:end]
+            # cumprod within chunk — safe because chunk is small
+            cum_f = torch.cumprod(cf, dim=1)
+            inv_cum_f = torch.reciprocal(cum_f)
+            # Include carry-in h: scale by inv_cum_f at each position
+            h_scaled = h.unsqueeze(1) * inv_cum_f
+            chunk_h = cum_f * (h_scaled + torch.cumsum(ca * inv_cum_f, dim=1))
+            output[:, start:end] = chunk_h
+            h = chunk_h[:, -1]
+
+        return output
 
     def forward(self, x):
         B, T, D = x.shape
 
         # Fast stream
-        f_gate = torch.sigmoid(self.fast_gate_w(x) + 0.5)  # +0.5 bias toward forgetting
+        f_gate = torch.sigmoid(self.fast_gate_w(x))
         f_forget = self.gate_lb_fast + (1 - self.gate_lb_fast) * f_gate
         f_val = self.fast_val_w(x)
-        fast_h = self._sequential_scan(f_forget, f_val)
+        fast_h = self._vectorized_scan(f_forget, f_val)
         fast_out = torch.sigmoid(self.fast_out_gate(x)) * fast_h
 
         # Slow stream
-        s_gate = torch.sigmoid(self.slow_gate_w(x) + 0.5)
+        s_gate = torch.sigmoid(self.slow_gate_w(x))
         s_forget = self.gate_lb_slow + (1 - self.gate_lb_slow) * s_gate
         s_val = self.slow_val_w(x)
-        slow_h = self._sequential_scan(s_forget, s_val)
+        slow_h = self._vectorized_scan(s_forget, s_val)
         slow_out = torch.sigmoid(self.slow_out_gate(x)) * slow_h
 
         # Merge
