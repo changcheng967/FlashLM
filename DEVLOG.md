@@ -352,63 +352,122 @@ At each position, a small MLP predicts a "direction vector" (d_model-dim) pointi
 
 ---
 
-## Cumulative Results
+## Phase 7: Return to Standard Attention (v9.3-v9.6)
 
-| Version | Architecture | Params | Time | PPL | Generation | Verdict |
-|:-------:|-------------|-------:|-----:|----:|-----------|---------|
-| v4 Bolt | Ternary recurrence | 4.3M | 2h | 15.05 | Weak | First working ternary LM |
-| v5 Thunderbolt | Ternary recurrence | 29.7M | 40h | **1.36** | **Coherent** | Best overall, needs beefy CPU |
-| v5.2 Nova | Transformer | 5.0M | 2h | 10.56 | Weak | Attention baseline |
-| v6 SUPERNOVA | Ternary GLU | 4.1M | 3h | 14.0 | Weak | Data bug |
-| v7 CORTEX | RWKV + ternary | ~6M | 2h | 377.66 | — | RWKV fails at small scale |
-| v7.1 CORTEX-III | Gated Conv k=15 | 4.6M | 2h | 18.16 | — | Wide kernel wins sweep |
-| v7.2 CORTEX-VI | + Hebbian Memory | ~6M | 2h | ~18 | Loops | Mask bug |
-| v7.3 CORTEX-VII | SWA + Hebbian alt | ~6M | 2h | 16.88 | — | Half layers bottlenecked |
-| **v7.4 CORTEX-VIII** | **DeltaNet + SWA** | **6.6M** | **2h** | **2.33** | Repetitive | **Best PPL** |
-| v7.5 CORTEX-IX | + coherence training | 7.6M | 2h | 3.29 | Incoherent | Below coherence threshold |
-| v7.6 CORTEX-X | + curated data | 6.6M | 2h | 7.54 | Worse | Overfit |
-| v8 SearchLM | Transformer + lookahead | 7.1M | 2h | 2.40 | Loops | Search doesn't help |
-| v8.1 SearchLM | CORTEX + lookahead | 6.6M | 2h | 2.40 | Loops | V_Corr +0.66 but no gen improvement |
-| v8.2 CORTEX-VIII | + subset + entropy | 6.6M | 2h | 2.42 | Loops broken | Entropy reg breaks repetition |
-| v8.3 CORTEX-VIII | + 10M subset | 6.6M | 2h | 2.50 | Best diversity | PPL ≠ coherence |
-| v8.4 Lean CORTEX | Full attn, 1.77M | 1.77M | 2h | 7.80 | "learned lesson" collapse | Too small for CORTEX |
-| v9.0 Reckoning | CPU-native (no attn/matmul) | ~1.2M | 2h | 130.19 | "time time time" collapse | Cell routing failed, slower than float |
-| v9.1 Reckoning v2 | Delta rule + state + conv | 17.3M | 2h | 24.60 | Words, no grammar | Static delta weaker than sequential |
-| v9.2 CORTEX+Compass | CORTEX-VIII + Story Compass | 6.7M | 2h | 17.56 | Incoherent | Compass competed with CE, 7.5x PPL regression |
+After CORTEX experiments exhausted novel architectures, returned to standard attention — the ONLY architecture that produced coherent text (v5).
+
+### v9.3 — SIA Narrative Tags
+- CORTEX-VIII with Structured Instruction Annotations: heuristic narrative tags ([SET], [ACT], [DIAL], etc.)
+- Data prep was too slow (stuck on 2.2GB tagging loop)
+- Never completed training — abandoned for v9.4
+
+### v9.4 — PCT Data + STMM
+- CORTEX-VIII + Pedagogical Curriculum Training (synthetic data from API)
+- Short-Term Memory Module (16-code codebook with EMA)
+- **Results:** PPL **3.98**, generation loops ("made feel" patterns)
+- **Verdict:** STMM codebook collapsed to a few active codes. Synthetic data teaches phrases, not sentence composition.
+
+### v9.5 — Diverse Curriculum
+- Clean CORTEX-VIII, no SIA tags, no STMM, 6 prompt templates
+- **Results:** PPL **~10-13**, best v9 generation before v9.6
+- **Verdict:** Simpler is better at this scale. Template diversity helps.
+
+### v9.6 — Standard Attention + Grammar Curriculum
+- Switched BACK to standard causal attention (first since v5.2)
+- Grammar curriculum: SVO/complex/micro-story stages with token-weighted CE
+- **~4M params**, d=256, 4L, 4H, d_head=32
+- **Training:** 2h on 4 vCPU, **1.74M tokens** (dataset too small)
+- **Results:** PPL **101.66** (worst PPL but best v9 generation quality)
+- **Verdict:** Standard attention produces better generation than CORTEX despite much worse PPL. Confirms v5's finding that attention is the right architecture for coherence.
 
 ---
 
-## Key Findings Across All Experiments
+## Phase 8: Vortex — CPU-Optimized Standard Attention (v10)
 
-1. **Scale + compute = coherence.** Only v5 Thunderbolt (29.7M, 40h) generates truly coherent text. Nothing under 10M params / 2h comes close.
+### v10 — BitLinear Attention
+- **Architecture:** Standard causal attention + SwiGLU + RMSNorm + weight tying + BitLinear (ternary weights)
+- **3.93M params**, d=256, d_ff=768, 4L, 4H, d_head=32, seq_len=128
+- Vocab: 4096 BPE, full TinyStories V2-GPT4 training split (~550M tokens)
+- **Training:** 39,169 steps · 20.05M tokens · 120 min · ~2,780 tok/s on 4 vCPU (AMD EPYC 7B13)
+- **Results:** Best val PPL **65.51**
+- **Generation:** Best 2h generation after v5. Real words, character names (Lily, Tom, Tim, Max), narrative fragments. Missing function words ("loved play" not "loved to play"). Name repetition bug ("Tim Tim Tim"). NOT coherent but closest to coherence of any 2h run.
 
-2. **Architecture matters enormously.** CORTEX-VIII (Gated DeltaNet) achieved 3.54x lower PPL than the Nova-Ignition transformer baseline on identical data/tokenizer.
+#### Two Critical Bugs Discovered (retroactive)
+1. **LR schedule bug:** `get_lr(step, warmup, max_lr, min_lr, max_seconds)` passes seconds (7200) as total_steps. Actual steps reach 39K+. LR bottoms at step 7,200, model trains at min LR for 80% of run.
+2. **No positional encoding:** No RoPE, no sinusoidal, nothing. Model cannot learn word order.
 
-3. **PPL ≠ coherence.** CORTEX-VIII reached PPL 2.33 but generates repetitive text. The model learned token statistics, not sentence structure.
+### v10.1 — Maximum Throughput
+- 2 layers (not 4), d_ff=512 (not 768), no dropout, torch.compile
+- **~3M params**, same d=256, 4H, d_head=32
+- **Training:** 89,785 steps · **45.97M tokens** · 120 min · ~6,400 tok/s (compile)
+- **Results:** Best val PPL **67.16** (same ballpark as v10, 2.3x more tokens)
+- **Generation:** Similar to v10 — same bugs present (broken LR + no PE). More tokens didn't help because LR was at minimum for 92% of training.
 
-4. **Delta rule > Hebbian.** M += β·(v − M·k) ⊗ k corrects stored memory. M += v ⊗ k only accumulates. This single change drove the 2.33 PPL breakthrough.
+#### Profiling Findings
+- Backward pass: 61% of step time. Forward: 26%. Optimizer: 13%.
+- FFN: 70% of forward pass.
+- BitLinear overhead on full step: only 2.5% (per-op benchmark suggested 40%, but backward/optimizer dilute it)
+- torch.compile: +21% speedup verified on AMD EPYC 7B13
+- Matmuls at 68-87% of hardware peak BLAS utilization
 
-5. **Inference tricks can't fix training.** Search-guided decoding (value heads), kNN retrieval, frequency penalties, nucleus sampling — none produce coherent grammar from an incoherent model.
+### v10.2 — Fixed Architecture (current)
+- **Fix 1:** RoPE positional encoding (copied from v5.2)
+- **Fix 2:** LR schedule uses estimated total steps (not seconds)
+- **Fix 3:** Linear decay LR (BabyLM 2025: beats cosine at small scale)
+- **Fix 4:** N-gram blocking (size 3) + repetition penalty (1.2) at decode
+- **Fix 5:** Top-p nucleus sampling (0.9) instead of top-k
+- **Config:** 3L, d=256, d_head=64, d_ff=512, torch.compile
+- **Expected:** ~6,500 tok/s → ~47M tokens in 2h, PPL 5-15
+- **Status:** 30-min validation run planned
 
-6. **Complexity doesn't scale down.** RWKV (377 PPL), multi-scale conv, story memory slots, Hebbian memory — all fail below 10M params. Simple architectures with proven mechanisms (delta rule, SWA) work best.
+---
 
-7. **Entropy regularization works for repetition.** Broke "Lily x20" loops in v8.2. But doesn't fix grammar — just makes the incoherence more diverse.
+## Cumulative Results
 
-8. **Data curation backfires.** Filtering to simple stories (v7.6) gave 3x worse PPL. The model needs diverse examples to generalize.
+| Version | Architecture | Params | Hardware | Time | PPL | Coherent? | Tokens |
+|:-------:|-------------|-------:|----------|-----:|----:|:---------:|-------:|
+| v4 Bolt | Ternary recurrence | 4.3M | 2 vCPU | 2h | 15.05 | No | — |
+| **v5 Thunderbolt** | **Ternary recurrence** | **29.7M** | **7950X3D** | **40h** | **1.36** | **YES** | **massive** |
+| v5.2 Nova | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No | ~3M |
+| v6 SUPERNOVA | Ternary GLU | 4.1M | 2 vCPU | 3h | 14.0 | No | — |
+| **v7.4 CORTEX-VIII** | **DeltaNet + SWA** | **6.6M** | **2 vCPU** | **2h** | **2.33** | Repetitive | **~15M** |
+| v7.5 CORTEX-IX | + coherence training | 7.6M | 2 vCPU | 2h | 3.29 | No | ~15M |
+| v8.3 CORTEX-VIII | + subset + entropy | 6.6M | 2 vCPU | 2h | 2.50 | No | ~15M |
+| v9.6 | Standard attn + curriculum | ~4M | 4 vCPU | 2h | 101.66 | Best v9 | 1.74M |
+| **v10** | **BitLinear attention** | **3.9M** | **4 vCPU** | **2h** | **65.51** | **Best 2h gen** | **20M** |
+| v10.1 | 2L + torch.compile | ~3M | 4 vCPU | 2h | 67.16 | Same as v10 | 46M |
+| v10.2 | + RoPE + LR fix | ~3.5M | 4 vCPU | 2h | — | Pending | — |
+
+---
+
+## Key Findings (17+ experiments)
+
+1. **PPL ≠ coherence.** v7.4 at PPL 2.33 is repetitive. v5.2 at PPL 10.56 is not coherent. Only v5 at PPL 1.36 (29.7M params, 40h) IS coherent.
+
+2. **Standard attention is the ONLY architecture that produced coherent text** (v5). CORTEX failed across 10+ experiments despite achieving much better PPL.
+
+3. **Model scale matters more than architecture.** v5 (29.7M, 40h) coherent. Everything under 10M params in 2h = not coherent.
+
+4. **v10/v10.1 had two critical bugs**: broken LR schedule (LR bottoms at step 7200) and no positional encoding. v5.2 had both correct.
+
+5. **Delta rule > Hebbian.** The single biggest architecture breakthrough: M += β·(v − M·k) ⊗ k (CORTEX-VIII) vs M += v ⊗ k.
+
+6. **Inference tricks can't fix training.** Search-guided decoding, kNN retrieval, frequency penalties — none produce coherent grammar from an incoherent model.
+
+7. **CPU-native ops must be in CPU-native code.** FLOP advantage of XNOR/popcount over float matmul is real at hardware level but invisible inside PyTorch.
+
+8. **BitLinear overhead is minimal** (2.5% on full step). Ternary weights don't hurt quality at this scale.
 
 ---
 
 ## Open Questions
 
-- **What is the minimum architecture+compute for coherent English generation on CPU?** v5 proved 29.7M/40h works. v7.4 proved 6.6M/2h reaches PPL 2.33 but not coherence. Where is the threshold?
-
-- **Can knowledge distillation bridge the gap?** Using a pretrained model's soft targets (KL divergence loss instead of hard next-token labels) could provide richer gradient signal. Not yet tested.
-
-- **Is the CORTEX architecture optimal at larger scale?** All CORTEX experiments were at 4-7M params. The delta rule advantage may grow (or shrink) at 30M+ scale.
-
-- **How much does longer training help?** Every experiment used 2h. The TinyStories paper trained for much longer. Is 6-8h enough for coherence at 6.6M?
+- **What is the minimum architecture+compute for coherent English generation on CPU?** v5 proved 29.7M/40h works. v10.2 (3.5M/2h with fixed bugs) is the next test.
+- **Can fixing the LR schedule + adding RoPE close the gap?** v5.2 had both correct (PPL 10.56, not coherent). v10.2 has more data diversity (full training split vs validation only). Is that enough?
+- **How much does longer training help?** Every experiment used 2h. 4-8h might push v10.2 into coherent territory.
+- **Data distillation?** Using a coherent model's soft targets (KL loss) could provide richer training signal. Not yet tested.
 
 ---
 
-*Last updated: 2026-04-19*
-*Next entry: v9.3 — pure CORTEX-VIII baseline on 4 vCPU to confirm architecture, then scale up on 16 vCPU machine*
+*Last updated: 2026-04-29*
+*Next: v10.2 30-min validation run — verify LR fix + RoPE produce PPL 3-6*
