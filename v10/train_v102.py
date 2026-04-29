@@ -319,13 +319,18 @@ class VortexModel(nn.Module):
             h = self.ln_in(self.embed(ctx))
             for block in self.blocks:
                 h = block(h)
-            logits = self.head(self.ln_out(h))[:, -1, :] / max(temperature, 1e-5)
+            logits = self.head(self.ln_out(h))[:, -1, :].clone()
 
-            # Repetition penalty
+            # Temperature
+            logits = logits / max(temperature, 1e-5)
+
+            # Repetition penalty (mild, on raw logits)
             if len(past_tokens) > 0:
-                seen = set(past_tokens[-64:])
-                for t in seen:
-                    logits[0, t] /= rep_penalty
+                for t in set(past_tokens[-64:]):
+                    if logits[0, t] > 0:
+                        logits[0, t] /= rep_penalty
+                    else:
+                        logits[0, t] *= rep_penalty
 
             # N-gram blocking
             if no_repeat_ngram > 0 and len(past_tokens) >= no_repeat_ngram:
@@ -337,15 +342,24 @@ class VortexModel(nn.Module):
                 for t in banned:
                     logits[0, t] = float('-inf')
 
-            # Top-p (nucleus) sampling
+            # Top-p (nucleus) sampling — only keep tokens in top-p mass
             sorted_logits, sorted_idx = torch.sort(logits[0], descending=True)
-            sorted_probs = F.softmax(sorted_logits, dim=-1)
-            cum_probs = torch.cumsum(sorted_probs, dim=-1)
-            cutoff = sorted_idx[cum_probs > top_p]
-            logits[0, cutoff] = float('-inf')
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            # Remove tokens with cumulative probability above the threshold
+            # Keep at least the top token
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+            sorted_indices_to_remove[0] = False
+            indices_to_remove = sorted_idx[sorted_indices_to_remove]
+            logits[0, indices_to_remove] = float('-inf')
 
-            probs = F.softmax(logits, dim=-1)
-            next_tok = torch.multinomial(probs, 1)
+            # Safety: if all logits are -inf, fall back to greedy from original
+            if not torch.isfinite(logits[0]).any():
+                raw = self.head(self.ln_out(h))[:, -1, :]
+                next_tok = raw.argmax(dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(logits, dim=-1)
+                next_tok = torch.multinomial(probs, 1)
             past_tokens.append(next_tok[0, 0].item())
             idx = torch.cat([idx, next_tok], dim=1)
         self.train()
