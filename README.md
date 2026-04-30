@@ -23,22 +23,22 @@ No GPUs · No pretraining · 17+ experiments
 | v5.2 | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No |
 | **v10** | **BitLinear attention** | **3.9M** | **4 vCPU** | **2h** | **65.51** | **Best 2h gen** |
 | v10.1 | 2L + torch.compile | ~3M | 4 vCPU | 2h | 67.16 | No |
-| v10.2 | + RoPE + LR fix | ~3.5M | 4 vCPU | 2h | — | In progress |
+| **v10.2** | **+ RoPE + LR fix** | **~3.5M** | **4 vCPU** | **2h** | **25.08** | **Bug fixes validated** |
 
-### Generation Sample (v10, T=0.8 — best 2-hour result)
+### Generation Sample (v10.2, T=0.5 — best 2-hour result)
 
 ```
-Once upon a time there a little named went the was . liked play his . had seen ball
-not on . One , was new . was happy . saw big the , was and , little named . would t
+Once upon a time there a boy Tim a. was years and to his, he a girl Lily One, she
+her, and went the to park play the, saw big with red. wanted take look the,
 
-The little girl in sky The was and for walk She very . felt happy he the with friends
-They the , the and friends and her and to park He so and and mom She to the . was
+The little girl sad and 't what do. Then the man, boy a came of house. He to the.
+said " are toys, you my friend The is for." little was happy thanked old and.
 
-A cat sat the , I you be friend Tom . had a town there a , big named found toy and
-a place play . One , little named got and . were surprised so and to the with cat
+A cat sat the. cat down down tree and, to cat. The said " you play!" cat not the.
+dog scared the, he away then a came of tree. The was. cat to the, it very.
 ```
 
-Real words, character names, narrative fragments. NOT coherent — missing function words, name repetition. Two critical bugs found and fixed in v10.2.
+Character names, dialogue fragments, narrative structure. Bug fixes cut PPL from 65 to 25 (2.6x). Still NOT coherent — 3.5M params is below the coherence threshold.
 
 ---
 
@@ -50,7 +50,9 @@ v10/v10.1 had two bugs that explain why PPL plateaued at 65 despite 46M tokens o
 
 **Bug 2 — No positional encoding:** Zero positional information. v5.2 used RoPE. Without PE the model cannot learn word order.
 
-**v10.2 fixes both** + adds linear decay LR (BabyLM 2025), N-gram blocking, top-p sampling. Config: 3L, d=256, d_head=64, d_ff=512, RoPE, torch.compile. Target: PPL 5-15.
+**v10.2 fixes both** + adds linear decay LR (BabyLM 2025), N-gram blocking, top-p sampling. Config: 3L, d=256, d_head=64, d_ff=512, RoPE, torch.compile.
+
+**v10.2 results:** Best val PPL **25.08** (2.6x improvement from bug fixes). 60,620 steps, 31M tokens in 2h. Generation quality improved — character names, dialogue attempts, narrative structure — but still NOT coherent. 3.5M params confirmed below coherence threshold.
 
 ---
 
@@ -73,7 +75,7 @@ v9.6 Vortex              ~4M  PPL 101.66  standard attn + curriculum
  ↓
 v10  Vortex             3.9M  PPL 65.51   BitLinear attn ← best 2h generation
  ↓
-v10.2 Vortex           ~3.5M  PPL  —     + RoPE + LR fix + N-gram blocking
+v10.2 Vortex           ~3.5M  PPL 25.08   + RoPE + LR fix + N-gram blocking
 ```
 
 ---
@@ -83,9 +85,10 @@ v10.2 Vortex           ~3.5M  PPL  —     + RoPE + LR fix + N-gram blocking
 1. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only coherent model.
 2. **Standard attention is the ONLY architecture that produced coherent text.** CORTEX (delta rule + SWA) achieved best PPL but never coherent generation.
 3. **Model scale > architecture.** 29.7M params + 40h = coherent. Everything under 10M params in 2h = not coherent.
-4. **v10/v10.1 had two critical bugs** (broken LR + no PE). v5.2 had both correct.
+4. **v10/v10.1 had two critical bugs** (broken LR + no PE). Fixing them cut PPL from 65 to 25 (2.6x). v5.2 had both correct.
 5. **Delta rule > Hebbian.** The biggest architecture breakthrough: M += β·(v − M·k) ⊗ k (CORTEX-VIII).
 6. **BitLinear overhead is minimal** (2.5% on full step). torch.compile gives free +21% speedup.
+7. **3.5M params confirmed below coherence threshold.** Even with correct LR + RoPE + 31M tokens, generation is fragmented.
 
 ---
 
@@ -122,7 +125,7 @@ FlashLM/
 +-- v9/  train_v91.py ... v96.py  CPU-native + curriculum experiments
 +-- v10/ train_v10.py             BitLinear attention
        train_v101.py              2L + torch.compile
-       train_v102.py              + RoPE + LR fix (v10.2)
+       train_v102.py              + RoPE + LR fix (v10.2) — PPL 25.08
 ```
 
 ---
