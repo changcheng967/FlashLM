@@ -410,15 +410,60 @@ After CORTEX experiments exhausted novel architectures, returned to standard att
 - torch.compile: +21% speedup verified on AMD EPYC 7B13
 - Matmuls at 68-87% of hardware peak BLAS utilization
 
-### v10.2 — Fixed Architecture (current)
+### v10.2 — Fixed Architecture
 - **Fix 1:** RoPE positional encoding (copied from v5.2)
 - **Fix 2:** LR schedule uses estimated total steps (not seconds)
 - **Fix 3:** Linear decay LR (BabyLM 2025: beats cosine at small scale)
 - **Fix 4:** N-gram blocking (size 3) + repetition penalty (1.2) at decode
 - **Fix 5:** Top-p nucleus sampling (0.9) instead of top-k
 - **Config:** 3L, d=256, d_head=64, d_ff=512, torch.compile
-- **Expected:** ~6,500 tok/s → ~47M tokens in 2h, PPL 5-15
-- **Status:** 30-min validation run planned
+- **Training:** 60,620 steps · 31M tokens · 120 min · ~4,310 tok/s
+- **Results:** Best val PPL **25.08** (2.6x improvement from bug fixes)
+- **Generation:** Character names, dialogue fragments, narrative structure — but still NOT coherent. 3.5M params confirmed below coherence threshold.
+
+### v10.3 — Scale Only (Data-Limited)
+- **Hypothesis:** More params = better. Scale from 3L to 6L, d_ff 512→768.
+- **6.2M params**, 6L, d=256, d_head=64, d_ff=768, RoPE, torch.compile
+- **Training:** 33,648 steps · 17.2M tokens · 120 min · ~2,393 tok/s
+- **Results:** Best val PPL **31.01** — WORSE than v10.2 (25.08)
+- **Generation:** Same quality as v10.2, indistinguishable
+- **Key insight:** More params + fewer tokens < fewer params + more tokens. At 2h/4vCPU, the bottleneck is data throughput, not model capacity. v10.3 sees only 17M tokens vs v10.2's 31M. Scale only works if you can feed it.
+
+### v11 — Self-Predictive Consistency (SPC)
+
+Inspired by the CE-Coherence Decoupling insight: CE loss can be fully minimized without learning narrative structure (proven by v7.4 at PPL 2.33). Can an auxiliary loss force the model to learn "what comes next" structurally?
+
+- **Architecture:** Same v10.2 base + InfoNCE loss at sentence boundaries
+- **Mechanism:** At stride=20, project current hidden state and future hidden state through same 128-dim projection. InfoNCE with batch negatives forces discriminative representations.
+- **3.05M params** (3L, d=256, d_ff=512, same as v10.2 minus slightly different head dim)
+- **Loss:** `total = CE + 0.1 * SPC_InfoNCE`
+- **Training:** ~61,500 steps · 32.6M tokens · 120 min · ~4,529 tok/s
+- **Results:** Best val PPL **24.72** (marginal, 1.4% better than v10.2)
+- **SPC loss:** 1.386 → 0.20 — collapsed fast, but learned surface features
+- **Generation:** Indistinguishable from v10.2. SPC learned positional regularities, not narrative structure.
+- **Key insight:** InfoNCE on raw hidden states is too easy. The model satisfies the auxiliary objective by encoding position-dependent patterns (position 20 always has different activations than position 60), not by learning narrative arcs. This is a surface match, not a deep match.
+
+### v12 — Narrative Bottleneck Tokens (NBT)
+
+Designed via the Radical Innovation Protocol (v9) — a structured methodology for generating genuinely novel CS ideas. NBT was derived from a distant-field analogy to compiler intermediate representations.
+
+- **Hypothesis:** Force narrative state through a 64-dim bottleneck at "plan positions" (every 20 tokens). Like a compiler IR: compressed representation that preserves semantic content but strips surface form. Temporal negatives (plan at pos 20 vs pos 60 from same sequence) force positional specificity.
+- **Architecture:** Same v10.2 base + 64-dim bottleneck projection + temporal-negative InfoNCE
+- **~3M params**, 3L, d=256, d_ff=512, d_plan=64
+- **Loss:** `total = CE + 0.1 * PLAN_InfoNCE(cross_seq + temporal_negatives)`
+- **Training:** 58,439 steps · 29.9M tokens · 120 min · ~4,150 tok/s
+- **Results:** Best val PPL **25.71** — close to v10.2, worse than v11
+- **PLAN loss:** 3.5 → 0.63 — learned something real (well below random)
+- **Generation:** Indistinguishable from v10.2/v11. Dialogue quotes, named characters, but no coherent multi-sentence narrative.
+- **Key insight:** The bottleneck + temporal negatives produced a genuinely learning signal (PLAN loss at 0.63, not collapsed), but this signal didn't translate into coherence. The CE-Coherence gap persists: the model can learn compressed representations without learning what makes text narratively coherent.
+
+#### CE-Coherence Decoupling — Summary
+
+Three experiments (v10.3 scale, v11 SPC, v12 NBT) all confirm:
+
+1. **CE loss can be minimized without learning narrative structure.** This is not a hypothesis — it's demonstrated by v7.4 (PPL 2.33, zero coherence).
+2. **Auxiliary losses at 3M params are a zero-sum game.** Every gradient spent on SPC/NBT is stolen from CE. At this scale, there's no surplus capacity.
+3. **The coherence bottleneck is not an optimization problem.** No amount of loss engineering at 3M params in 2h produces coherent text. The barrier is fundamental: the model doesn't have enough parameters to represent narrative structure, and no loss function can create capacity that doesn't exist.
 
 ---
 
@@ -436,11 +481,14 @@ After CORTEX experiments exhausted novel architectures, returned to standard att
 | v9.6 | Standard attn + curriculum | ~4M | 4 vCPU | 2h | 101.66 | Best v9 | 1.74M |
 | **v10** | **BitLinear attention** | **3.9M** | **4 vCPU** | **2h** | **65.51** | **Best 2h gen** | **20M** |
 | v10.1 | 2L + torch.compile | ~3M | 4 vCPU | 2h | 67.16 | Same as v10 | 46M |
-| v10.2 | + RoPE + LR fix | ~3.5M | 4 vCPU | 2h | — | Pending | — |
+| v10.2 | + RoPE + LR fix | ~3.5M | 4 vCPU | 2h | 25.08 | Bug fixes validated | 31M |
+| v10.3 | Scale to 6L | 6.2M | 4 vCPU | 2h | 31.01 | No — data-limited | 17M |
+| v11 | + InfoNCE SPC | 3.05M | 4 vCPU | 2h | 24.72 | No — surface features | 32.6M |
+| v12 | + NBT bottleneck | ~3M | 4 vCPU | 2h | 25.71 | No — slower convergence | 29.9M |
 
 ---
 
-## Key Findings (17+ experiments)
+## Key Findings (20+ experiments)
 
 1. **PPL ≠ coherence.** v7.4 at PPL 2.33 is repetitive. v5.2 at PPL 10.56 is not coherent. Only v5 at PPL 1.36 (29.7M params, 40h) IS coherent.
 
@@ -458,16 +506,20 @@ After CORTEX experiments exhausted novel architectures, returned to standard att
 
 8. **BitLinear overhead is minimal** (2.5% on full step). Ternary weights don't hurt quality at this scale.
 
+9. **More params + fewer tokens = worse.** v10.3 (6.2M, 17M tokens) lost to v10.2 (3.5M, 31M tokens). Data-limited, not capacity-limited.
+
+10. **Auxiliary losses don't crack coherence at 3M params.** SPC (InfoNCE at sentence boundaries), NBT (64-dim bottleneck with temporal negatives) — both produced marginal PPL changes and zero coherence improvement. The CE-Coherence gap is structural, not an optimization problem.
+
 ---
 
 ## Open Questions
 
-- **What is the minimum architecture+compute for coherent English generation on CPU?** v5 proved 29.7M/40h works. v10.2 (3.5M/2h with fixed bugs) is the next test.
-- **Can fixing the LR schedule + adding RoPE close the gap?** v5.2 had both correct (PPL 10.56, not coherent). v10.2 has more data diversity (full training split vs validation only). Is that enough?
+- **What learning algorithm can efficiently compress narrative grammar from data?** v10.2 proved standard attention + CE works for token prediction. v11/v12 proved auxiliary losses don't crack coherence at this scale. The CE-Coherence gap suggests we need a fundamentally different learning signal, not a better architecture.
+- **Is the coherence barrier really about params, or about the learning algorithm?** v5 (29.7M, 40h) is coherent but used standard CE loss. Could a better learning algorithm achieve coherence at smaller scale?
 - **How much does longer training help?** Every experiment used 2h. 4-8h might push v10.2 into coherent territory.
 - **Data distillation?** Using a coherent model's soft targets (KL loss) could provide richer training signal. Not yet tested.
 
 ---
 
-*Last updated: 2026-04-29*
-*Next: v10.2 30-min validation run — verify LR fix + RoPE produce PPL 3-6*
+*Last updated: 2026-05-02*
+*Next: Apply Radical Innovation Protocol to find a novel learning algorithm that breaks the CE-Coherence gap*
