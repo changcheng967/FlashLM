@@ -459,11 +459,29 @@ Designed via the Radical Innovation Protocol (v9) — a structured methodology f
 
 #### CE-Coherence Decoupling — Summary
 
-Three experiments (v10.3 scale, v11 SPC, v12 NBT) all confirm:
+Four experiments (v10.3 scale, v11 SPC, v12 NBT, v13.1 SLR) all confirm:
 
 1. **CE loss can be minimized without learning narrative structure.** This is not a hypothesis — it's demonstrated by v7.4 (PPL 2.33, zero coherence).
-2. **Auxiliary losses at 3M params are a zero-sum game.** Every gradient spent on SPC/NBT is stolen from CE. At this scale, there's no surplus capacity.
+2. **Auxiliary losses at 3M params are a zero-sum game.** Every gradient spent on SPC/NBT/SLR is stolen from CE. At this scale, there's no surplus capacity.
 3. **The coherence bottleneck is not an optimization problem.** No amount of loss engineering at 3M params in 2h produces coherent text. The barrier is fundamental: the model doesn't have enough parameters to represent narrative structure, and no loss function can create capacity that doesn't exist.
+4. **All 4 auxiliary losses share the same structural flaw:** they provide discriminative gradient signal ("is this the right representation?") but generation needs generative capability ("produce coherent next tokens"). Mean-pooling dilutes the gradient.
+
+### v13 — Sentence-Level Reconstruction (SLR)
+
+Inspired by compiler multi-pass optimization: CE operates at token level (peephole optimizer). SLR adds a sentence-level pass. Two variants tested:
+
+**v13.0 — Cosine SLR (collapsed):** Mean-pooled sentence hidden states, cosine similarity between adjacent sentences. SLR loss collapsed from 0.686 → 0.002 in 100 steps — trivially easy because adjacent TinyStories sentences share similar vocabulary.
+
+**v13.1 — Contrastive SLR (learned but no coherence improvement):** InfoNCE with cross-story negatives. At each sentence boundary, distinguish the true next sentence from other stories' continuations. SLR genuinely learned (loss ~2.3, not collapsed), but generation quality unchanged.
+
+- **Architecture:** v10.2 base + SLR decoder (slr_fc1: d_model→d_ff, slr_fc2: d_ff→vocab)
+- **Params:** 5.24M (3M transformer + 2.2M SLR decoder)
+- **Training:** 2h, 4 vCPU, ~4,586 tok/s, ~27.7M tokens
+- **Results:** Best val PPL **27.18** (worse than v10.2's 25.08)
+- **SLR loss:** Stable ~2.3 throughout training (genuinely learning, not collapsed)
+- **Generation:** Indistinguishable from v10.2/v11/v12 — character names, sentence fragments, no coherence
+
+**Key insight:** Contrastive SLR learned to discriminate between same-story and cross-story continuations (InfoNCE loss 2.3, well above random). But this discriminative signal didn't help generation because the gradient flows through mean-pooled sentence representations, which dilutes token-level information. The model learned "is this sentence from the same story?" without learning "what words should come next?"
 
 ---
 
@@ -485,10 +503,11 @@ Three experiments (v10.3 scale, v11 SPC, v12 NBT) all confirm:
 | v10.3 | Scale to 6L | 6.2M | 4 vCPU | 2h | 31.01 | No — data-limited | 17M |
 | v11 | + InfoNCE SPC | 3.05M | 4 vCPU | 2h | 24.72 | No — surface features | 32.6M |
 | v12 | + NBT bottleneck | ~3M | 4 vCPU | 2h | 25.71 | No — slower convergence | 29.9M |
+| v13.1 | + Contrastive SLR | 5.24M | 4 vCPU | 2h | 27.18 | No — discriminative loss | 27.7M |
 
 ---
 
-## Key Findings (20+ experiments)
+## Key Findings (21+ experiments)
 
 1. **PPL ≠ coherence.** v7.4 at PPL 2.33 is repetitive. v5.2 at PPL 10.56 is not coherent. Only v5 at PPL 1.36 (29.7M params, 40h) IS coherent.
 
@@ -508,13 +527,13 @@ Three experiments (v10.3 scale, v11 SPC, v12 NBT) all confirm:
 
 9. **More params + fewer tokens = worse.** v10.3 (6.2M, 17M tokens) lost to v10.2 (3.5M, 31M tokens). Data-limited, not capacity-limited.
 
-10. **Auxiliary losses don't crack coherence at 3M params.** SPC (InfoNCE at sentence boundaries), NBT (64-dim bottleneck with temporal negatives) — both produced marginal PPL changes and zero coherence improvement. The CE-Coherence gap is structural, not an optimization problem.
+10. **Discriminative auxiliary losses don't help generation.** SPC (InfoNCE on hidden states), NBT (bottleneck tokens), SLR (contrastive sentence matching) — all provide "is this the right representation?" gradient. Generation needs "produce the right tokens" capability. The pooling operation (mean-pool over sentence) dilutes gradient signal to the token level. This is the discriminative-generative gap.
 
 ---
 
 ## Open Questions
 
-- **What learning algorithm can efficiently compress narrative grammar from data?** v10.2 proved standard attention + CE works for token prediction. v11/v12 proved auxiliary losses don't crack coherence at this scale. The CE-Coherence gap suggests we need a fundamentally different learning signal, not a better architecture.
+- **Can generative auxiliary losses (MTP) break the discriminative-generative gap?** v14 tests multi-token prediction: predict future tokens directly (CE loss on actual tokens), not representations. Validated by DeepSeek-V3 at scale. Structurally different from all previous auxiliary losses.
 - **Is the coherence barrier really about params, or about the learning algorithm?** v5 (29.7M, 40h) is coherent but used standard CE loss. Could a better learning algorithm achieve coherence at smaller scale?
 - **How much does longer training help?** Every experiment used 2h. 4-8h might push v10.2 into coherent territory.
 - **Data distillation?** Using a coherent model's soft targets (KL loss) could provide richer training signal. Not yet tested.
@@ -522,4 +541,4 @@ Three experiments (v10.3 scale, v11 SPC, v12 NBT) all confirm:
 ---
 
 *Last updated: 2026-05-02*
-*Next: Apply Radical Innovation Protocol to find a novel learning algorithm that breaks the CE-Coherence gap*
+*Next: v14 MTP — testing whether generative auxiliary loss (predict actual future tokens) breaks the discriminative-generative gap*
