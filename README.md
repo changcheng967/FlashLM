@@ -120,9 +120,6 @@ FlashLM/
     +-- train_v11_cummix.py            v11 CumMix (fully novel, active)
     +-- train_v11_wavememory.py        v11 WaveMemory (first attempt, slow)
     +-- train_v10_cachecore.py         CacheCore d=128 (failed)
-    +-- demo_space/                    HuggingFace Spaces demo
-    +-- hf_upload/                     HuggingFace model upload
-    +-- reddit_post.md                 r/LocalLLaMA post
 ```
 
 ---

@@ -1,4 +1,0 @@
-torch
-tokenizers
-audioop-lts
-gradio
