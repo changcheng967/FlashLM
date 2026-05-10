@@ -2,9 +2,9 @@
 
 # FlashLM
 
-### CPU-Native Language Models — Trained from Scratch on Free-Tier CPUs
+### A Fully Novel CPU-Native Language Model — Every Component Designed From Scratch
 
-No GPUs · No pretraining · 30+ experiments
+No GPUs · No pretraining · No standard transformer components · 30+ experiments
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20113960.svg)](https://doi.org/10.5281/zenodo.20113960)
@@ -15,31 +15,56 @@ No GPUs · No pretraining · 30+ experiments
 
 ---
 
-## The Breakthrough: FSP
+## v11 CumMix — Active
 
-All 21 failed experiments shared one assumption — they used token-level cross-entropy as the **only** training objective. Adding **Future Sentence Prediction (FSP)** alongside CE gave a **2.5x PPL improvement** (25.08 → 10.24) with only **1.7% parameter overhead**.
+A 3.66M parameter language model where **every single component is novel** and designed for CPU. No attention, no RMSNorm, no SwiGLU, no AdamW, no standard cross-entropy.
 
-**How it works:** At every 16th position, the model predicts which words appear in the next 64 tokens. This forces the backbone to encode future planning, not just local pattern matching.
+| Component | What Standard Transformers Use | What v11 Uses Instead |
+|-----------|-------------------------------|----------------------|
+| Normalization | RMSNorm (hardcoded p=2) | **PowerNorm** — learns the exponent p per layer |
+| Position encoding | RoPE / sinusoidal lookup | **CumStepPos** — positions as cumulative random walk |
+| Token mixing | Self-attention O(n²) | **CumMix** — compress → cumsum → mix → expand O(n) |
+| Feed-forward | SwiGLU (3 matmuls) | **HarmonicFFN** — h + sin(ωh + φ) (2 matmuls) |
+| Loss function | Cross-entropy | **TACE** — frequency-weighted CE + learned temperature + FSP |
+| Optimizer | AdamW | **DualMomAdam** — dual momentum with MACD crossover |
 
-> *Inspired by ["Beyond Multi-Token Prediction"](https://arxiv.org/abs/2510.14751) (Mahajan et al., 2025)*
+### CPU Benchmarks (AMD EPYC 7B13, PyTorch + MKL)
+
+| Operation | Latency | vs Attention |
+|-----------|--------:|:------------:|
+| cumsum over T=256 | 11 μs | — |
+| **CumMix layer** (d=256, k=32) | **136 μs** | — |
+| Attention layer (d=256) | 2,062 μs | 15x slower |
+| **CumMix + FFN block** | **745 μs** | — |
+| Attention + FFN block | 2,672 μs | 3.6x slower |
+
+CumMix is 15x cheaper than attention per layer. 6 CumMix layers fit in the same compute budget as 3 attention layers — deeper model, same wall time.
+
+### Training Status
+
+Currently training on a free 4 vCPU cloud machine (2h run). Speed: **~2,900 tok/s**.
+
+```
+step  900 | CE 1.68 PPL 5.38 | tok/s 2,895 | 42m
+```
 
 ---
 
 ## Results
 
-| Version | Architecture | Params | Hardware | Time | PPL | Coherent? |
-|:-------:|-------------|-------:|----------|-----:|----:|:---------:|
-| **v5** | Ternary recurrence | **29.7M** | 7950X3D | **40h** | **1.36** | **Yes** |
-| v4-Large* | Ternary Bolt | 16.8M | 24-core CPU | 9h | 6.11 | Yes |
-| v7.4 | Gated DeltaNet + SWA | 6.6M | 2 vCPU | 2h | 2.33 | Repetitive |
-| **v10 FSP** | Attention + FSP | **3.74M** | 4 vCPU | 2h | **10.24** | **Partial** |
-| v5.2 | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No |
-| v4 | Ternary Bolt | 4.3M | CPU | varies | 15.05 | No |
-| v11 CumMix | Fully novel (active) | 3.66M | 4 vCPU | 2h | Testing | — |
+| Version | Architecture | Params | Time | PPL | Coherent? |
+|:-------:|-------------|-------:|-----:|----:|:---------:|
+| **v5** | Ternary recurrence | 29.7M | 40h | **1.36** | **Yes** |
+| v4-Large* | Ternary Bolt | 16.8M | 9h | 6.11 | Yes |
+| v7.4 | Gated DeltaNet + SWA | 6.6M | 2h | 2.33 | Repetitive |
+| **v10 FSP** | Attention + FSP | 3.74M | 2h | **10.24** | Partial |
+| v5.2 | Attention + RoPE | 5.0M | 2h | 10.56 | No |
+| v4 | Ternary Bolt | 4.3M | varies | 15.05 | No |
+| v10 base | Attention (no FSP) | 3.74M | 2h | 25.08 | No |
 
 *v4-Large trained by community on 24-core/256GB RAM machine
 
-**Sample generation from v10 FSP (3.74M params, 2h on 4 vCPU):**
+**Sample generation from v10 FSP (3.74M params, 2h on free CPU):**
 
 > Once upon a time, there was a little girl named Sue. Sue was very sad because she could not find her toy. One day, she found a big box near her house.
 
@@ -47,37 +72,23 @@ All 21 failed experiments shared one assumption — they used token-level cross-
 
 ---
 
-## v11 CumMix: Fully Novel CPU-Native Architecture
+## Key Findings
 
-Every component is novel and designed for CPU. No attention, no RMSNorm, no SwiGLU, no AdamW.
-
-| Component | Standard | FlashLM v11 |
-|-----------|----------|-------------|
-| **Normalization** | RMSNorm (p=2) | PowerNorm — learns the exponent p |
-| **Position** | RoPE / sinusoidal | CumStepPos — positions as cumulative random walk |
-| **Mixing** | Self-attention (O(n²)) | CumMix — compress → cumsum → mix → expand (O(n)) |
-| **FFN** | SwiGLU (3 matmuls) | HarmonicFFN — h + sin(ωh + φ) (2 matmuls) |
-| **Loss** | Cross-entropy | Token-Adaptive CE + FSP |
-| **Optimizer** | AdamW | DualMomAdam — dual momentum + MACD crossover |
-
-**CPU benchmarks** (AMD EPYC 7B13, PyTorch + MKL):
-
-| Operation | Latency |
-|-----------|--------:|
-| cumsum over T=256 | **11 μs** |
-| CumMix layer | **136 μs** |
-| Attention layer | 2,062 μs |
-
-CumMix is **15x cheaper** than attention per layer. 6 CumMix layers fit in the same compute budget as 3 attention layers.
+1. **Loss > architecture.** Adding FSP (future sentence prediction) to v10 gave 2.5x PPL improvement. All 21 architecture-only experiments failed to match this.
+2. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only coherent model.
+3. **Scale wins.** 29.7M params + 40h = coherent. Everything under 10M in 2h = not coherent.
+4. **CPU needs CPU-native design.** Custom C kernels are 2x slower than Python + MKL. Speed comes from algorithm design, not implementation.
+5. **Attention is overkill for small CPU models.** O(n²) attention wastes CPU cycles. CumMix replaces it with O(n) cumulative sum at 15x lower cost.
 
 ---
 
-## Key Findings
+## FSP (Future Sentence Prediction)
 
-1. **Loss > architecture.** One auxiliary loss (FSP) beat 21 architecture changes. The training objective matters more than the model design.
-2. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only coherent model.
-3. **Scale wins.** 29.7M params + 40h = coherent. Everything under 10M in 2h = not coherent. Yet.
-4. **CPU needs CPU-native design.** Custom C kernels are 2x slower than Python + MKL. Speed comes from algorithm design, not implementation.
+The key insight from 30+ experiments: all 21 failures used token-level cross-entropy as the **only** training objective.
+
+**FSP adds a planning signal:** at every 16th position, the model predicts a bag-of-words of the next 64 tokens. This forces the backbone to encode future information, not just local patterns. Result: **PPL 25.08 → 10.24** with only 1.7% parameter overhead.
+
+> *Inspired by ["Beyond Multi-Token Prediction"](https://arxiv.org/abs/2510.14751) (Mahajan et al., 2025)*
 
 ---
 
@@ -87,8 +98,8 @@ CumMix is **15x cheaper** than attention per layer. 6 CumMix layers fit in the s
 v4   Bolt               4.3M  PPL 15.05   ternary conv
 v5   Thunderbolt       29.7M  PPL  1.36   ternary recurrence ← only coherent
 v5.2  Nova              5.0M  PPL 10.56   attention + RoPE
-v7.4 CORTEX-VIII        6.6M  PPL  2.33   delta rule + SWA ← best PPL
-v10  FSP                3.74M PPL 10.24   attention + FSP ← best 2h
+v7.4 CORTEX-VIII        6.6M  PPL  2.33   delta rule + SWA
+v10  FSP                3.74M PPL 10.24   attention + FSP ← best 2h result
 v11  CumMix             3.66M PPL  ???    fully novel CPU-native ← active
 ```
 
@@ -106,7 +117,7 @@ v9/  train_v9x.py                  data engineering
 v10/
     train_v10_fsp.py               v10 FSP (PPL 10.24)
     train_v11_cummix.py            v11 CumMix (active)
-    train_v11_wavememory.py        v11 WaveMemory (slow)
+    train_v11_wavememory.py        v11 WaveMemory (first attempt)
     train_v10_cachecore.py         CacheCore d=128 (failed)
 ```
 
@@ -116,19 +127,8 @@ v10/
 
 - **Train from scratch** — no fine-tuning pretrained models
 - **CPU-native design** — architectures built for CPU, not GPU ports
-- **Honest reporting** — all 30+ experiments documented, including failures
+- **Honest reporting** — all experiments documented, including failures
 - **Constrained hardware** — free-tier cloud CPUs, no GPUs
-
----
-
-## Links
-
-- [v10 FSP Demo](https://huggingface.co/spaces/changcheng967/flashlm-v10-fsp-demo) · [Model](https://huggingface.co/changcheng967/flashlm-v10-fsp)
-- [v5 Thunderbolt](https://huggingface.co/changcheng967/flashlm-v5-thunderbolt) · [Demo](https://huggingface.co/spaces/changcheng967/flashlm-v5-demo)
-- [v5.2 Nova](https://huggingface.co/changcheng967/flashlm-v5.2-nova-ignition)
-- [v8.3 CORTEX](https://huggingface.co/changcheng967/flashlm-v8.3-cortex-viii)
-- [v6 SUPERNOVA](https://huggingface.co/changcheng967/flashlm-v6-supernova)
-- [v4 Bolt](https://huggingface.co/changcheng967/flashlm-v4-bolt)
 
 ---
 
