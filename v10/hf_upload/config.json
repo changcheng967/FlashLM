@@ -1,0 +1,22 @@
+{
+  "model_name": "flashlm-v10-fsp",
+  "architecture": "GPT-FSP (Transformer + Future Sentence Prediction)",
+  "vocab_size": 4096,
+  "d_model": 256,
+  "d_ff": 512,
+  "n_heads": 8,
+  "n_layers": 4,
+  "seq_len": 256,
+  "dropout": 0.1,
+  "positional_encoding": "RoPE",
+  "ffn_type": "SwiGLU",
+  "weight_tying": true,
+  "fsp_tau": 64,
+  "fsp_sample_rate": 16,
+  "fsp_alpha": 0.1,
+  "fsp_pos_weight": 50.0,
+  "total_params": 3737856,
+  "compute_params": 2623744,
+  "embedding_params": 1048576,
+  "fsp_params": 65536
+}

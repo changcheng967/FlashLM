@@ -4,7 +4,7 @@
 
 **CPU-Native Language Models — Trained from Scratch on Free-Tier CPUs**
 
-No GPUs · No pretraining · 10+ experiments
+No GPUs · No pretraining · 30+ experiments
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -21,106 +21,84 @@ No GPUs · No pretraining · 10+ experiments
 | **v5** | **Ternary recurrence** | **29.7M** | **7950X3D** | **40h** | **1.36** | **YES** |
 | v4-Large* | Ternary Bolt | 16.8M | 24-core CPU | 9h | 6.11 | YES |
 | v7.4 | Gated DeltaNet + SWA | 6.6M | 2 vCPU | 2h | 2.33 | Repetitive |
+| **v10 FSP** | **Attention + FSP** | **3.74M** | **4 vCPU** | **2h** | **10.24** | **Partial** |
+| v11 CumMix | CumMix + HarmonicFFN (novel) | 3.66M | 4 vCPU | 2h | Testing | — |
 | v4 | Ternary Bolt | 4.3M | CPU | varies | 15.05 | No |
 | v5.2 | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No |
 
 *v4-Large trained by community on 24-core/256GB RAM machine
 
-### Generation Sample (v4-Large, community, CPU)
+### Generation Sample (v10 FSP, CPU)
 
 ```
-One day, Lily's little brother, Max, came into the room. He asked, "Mom, can I
-help you with the puzzle?" Lily replied, "Sure, you can play with it."
-Max said, "That sounds fun!" Lily was happy and said, "Thank you, brother!
-You are so helpful."
-Later that day, Lily went to play with her toy car. She accidentally dropped
-it and it broke into many pieces. She started to feel sad and tried to make
-it worse.
-But then, her mommy came into the room and saw the broken frame. She told Lily
-that the glue was broken and it was broken. Lily felt bad for making a mistake,
-so she promised to be more careful with her fragile vase.
+Once upon a time, there was a little girl named Sue. Sue was very sad because
+she could not find her toy. One day, she found a big box near her house.
+```
+```
+A cat sat on the bed. The cat saw the cat and wanted to help. The cat jumped
+on the bench and began to walk in the sky. The cat started to feel better
+and tried...
 ```
 
-Ternary architecture produces coherent stories with dialogue, emotional language, causal chains, and narrative structure.
+Grammatically correct with named characters, dialogue, and sentence structure. Cross-sentence causal reasoning is still weak.
 
 ---
 
-## Key Insight: CPU-Native Architecture
+## Key Insight: FSP (Future Sentence Prediction)
 
-Standard transformers are designed for **GPU tensor cores** — dense FP32 multiplications, O(n²) attention. On CPU, this is fundamentally inefficient.
+**The breakthrough:** All 21 failed experiments shared one assumption — they used token-level cross-entropy as the ONLY training objective. Adding FSP alongside CE gave a **2.5x PPL improvement** (25.08 → 10.24) with only **1.7% parameter overhead**.
 
-**Ternary weights ({-1, 0, +1}) replace multiplications with additions:**
+FSP: At every 16th position, predict a bag-of-words of the next 64 tokens. This forces the backbone to encode future planning information, not just local next-token prediction.
 
-- No floating-point multiplications in weight matrices
-- O(n·k) depthwise convolutions instead of O(n²) attention
-- 20x less memory per weight (1.58 bits vs 32 bits) → better cache utilization
-- More parameters fit in the same compute budget
-
-v4 at 4.3M ternary params achieves PPL 15.05 on CPU — standard attention at 3.5M params only reaches PPL 25.08. **Ternary learns 2x more efficiently per token on CPU.**
+Reference: ["Beyond Multi-Token Prediction" (Mahajan et al., 2025)](https://arxiv.org/abs/2510.14751)
 
 ---
 
 ## Architecture Evolution
 
 ```
-v4   Bolt               4.3M  PPL 15.05   ternary conv ← CPU-native base
+v4   Bolt               4.3M  PPL 15.05   ternary conv
  ↓
 v5   Thunderbolt       29.7M  PPL  1.36   ternary recurrence ← ONLY coherent
  ↓
-v5.2  Nova              5.0M  PPL 10.56   attention + RoPE ← GPU baseline
- ↓
-v6   SUPERNOVA          4.1M  PPL 14.0    ternary GLU
+v5.2  Nova              5.0M  PPL 10.56   attention + RoPE
  ↓
 v7.4 CORTEX-VIII        6.6M  PPL  2.33   delta rule + SWA ← best PPL
  ↓
-v8.3 CORTEX-VIII        6.6M  PPL  2.50   subset + entropy reg
+v10  FSP                3.74M PPL 10.24   attention + FSP ← best 2h result
  ↓
-v10  CacheCore           ???   PPL  ???    CPU-native ← ACTIVE
+v11  CumMix             3.66M PPL  ???    FULLY NOVEL CPU-native ← ACTIVE
 ```
+
+---
+
+## v11 CumMix: Fully Novel CPU-Native Architecture
+
+Every component designed for CPU. No attention, no standard FFN, no standard components.
+
+| Component | Design | Novel? |
+|-----------|--------|:------:|
+| PowerNorm | Learnable Lp normalization (p learned per layer) | YES |
+| CumStepPos | Positions as cumulative random walk (cumsum of learned steps) | YES |
+| CumMix | compress→cumsum→normalize→mix→expand (no attention, 15x cheaper) | YES |
+| HarmonicFFN | identity + learned sinusoidal perturbation (2 matmuls) | YES |
+| Contrastive CE | CE + hard-negative margin loss | YES |
+| DualMomAdam | Dual fast/slow momentum with MACD crossover scaling | YES |
+
+**CPU benchmark** (AMD EPYC 7B13, PyTorch + MKL):
+- CumMix layer: **136 us** vs Attention layer: 2,062 us (15x cheaper)
+- cumsum over T=256: **11 us** (nearly free)
+- 6 CumMix layers + FFN cost less than 3 attention layers + FFN
 
 ---
 
 ## Key Findings
 
-1. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only self-trained coherent model.
-2. **CPU-native architecture matters.** Ternary weights + depthwise conv outperform standard attention on CPU by 2x PPL at equal scale.
+1. **FSP > architecture changes.** Adding FSP to v10 (same transformer) gave 2.5x PPL improvement. All 21 architecture-only experiments failed to match this.
+2. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only self-trained coherent model.
 3. **Model scale > architecture.** 29.7M params + 40h = coherent. Everything under 10M params in 2h = not coherent.
-4. **v4 community results prove ternary coherence.** 16.8M params on 24-core CPU (9h, ~120M tokens) produces coherent dialogue and story structure.
-5. **Standard attention is GPU-optimized, not CPU-optimized.** Dense FP32 matmul + O(n²) attention wastes CPU cycles. CPU needs architectures designed for CPU.
-6. **Standard attention experiments (v10-v15) abandoned.** All used standard attention transformers — not CPU-native. Removed from codebase.
-
----
-
-## CORTEX Architecture (v7)
-
-Inspired by the delta rule from neuroscience: **M += β·(v − M·k) ⊗ k** — correct stored memory, don't just accumulate.
-
-| Experiment | Idea | PPL | Verdict |
-|-----------|------|----:|---------|
-| v7 RWKV | Linear attention | 377.66 | Fails below 100M params |
-| CORTEX-III | Kernel sweep, k=15 won | 18.16 | Dense wide kernel wins |
-| CORTEX-VI | Hebbian memory | ~18 | Can't correct errors |
-| CORTEX-VII | SWA + Hebbian alternating | 16.88 | Half layers bottlenecked |
-| **CORTEX-VIII** | **All-6L delta rule + SWA** | **2.33** | **Best PPL, beat v5.2 by 4.5x** |
-| CORTEX-IX | + unlikelihood + MTP | 3.29 | Still incoherent |
-| CORTEX-X | + curated data | 7.54 | Overfit |
-
----
-
-## CacheCore (v10, active)
-
-CPU-native architecture designed around the CPU cache hierarchy (AMD EPYC Zen 3):
-
-- **L1 (32KB, 4 cycles):** Attention matrices fit here at d=128
-- **L2 (512KB, 12 cycles):** ~128K float32 params per core — model weights target this
-- **L3 (32MB, 40 cycles):** Shared across cores, contested
-- **RAM (~312 cycles):** Avoid at all costs
-
-Design principles:
-1. d=128 keeps attention QK^T in L1 (128×128 = 64KB)
-2. Wide SwiGLU FFN (d_ff=512) for representational capacity
-3. C++ fused kernels for quantize+lookup, EMA scan, Hadamard transform
-4. Target: 5-10× faster than standard attention on CPU
+4. **CPU needs CPU-native design.** Custom C kernels are 2x SLOWER than Python+MKL. The only way to be fast on CPU is large contiguous matmuls that leverage MKL.
+5. **Standard attention is GPU-optimized.** Dense FP32 matmul + O(n²) attention wastes CPU cycles. CumMix replaces T×T attention with O(T) cumsum.
 
 ---
 
@@ -129,16 +107,22 @@ Design principles:
 ```
 FlashLM/
 +-- README.md
-+-- DEVLOG.md                     full research history (v3→present)
++-- DEVLOG.md                          full research history (v3→present)
 +-- LICENSE
-+-- v4/  train_v4_bolt.py         ternary Bolt (CPU-native base)
-+-- v5/  train_v52_nova.py        attention + RoPE baseline
-+-- v6/  train_v6_supernova.py    ternary GLU
-+-- v7/  train_v74.py ... v76.py  CORTEX-VIII / IX / X
-+-- v8/  train_v8.py ... v84.py   SearchLM (test-time compute)
-+-- v9/  train_v9x.py             data engineering experiments
-+-- v10/ train_v10_cachecore.py   CacheCore (CPU-native, active)
-+-- v10/ csrc/                    C++ CPU-optimized kernels
++-- v4/  train_v4_bolt.py              ternary Bolt (CPU-native base)
++-- v5/  train_v52_nova.py             attention + RoPE baseline
++-- v6/  train_v6_supernova.py         ternary GLU
++-- v7/  train_v74.py ... v76.py       CORTEX-VIII / IX / X
++-- v8/  train_v8.py ... v84.py        SearchLM (test-time compute)
++-- v9/  train_v9x.py                  data engineering experiments
++-- v10/
+    +-- train_v10_fsp.py               v10 FSP (PPL 10.24) ★
+    +-- train_v11_cummix.py            v11 CumMix (fully novel, active)
+    +-- train_v11_wavememory.py        v11 WaveMemory (first attempt, slow)
+    +-- train_v10_cachecore.py         CacheCore d=128 (failed)
+    +-- demo_space/                    HuggingFace Spaces demo
+    +-- hf_upload/                     HuggingFace model upload
+    +-- reddit_post.md                 r/LocalLLaMA post
 ```
 
 ---
@@ -155,6 +139,8 @@ FlashLM/
 ## Links
 
 - [GitHub](https://github.com/changcheng967/FlashLM)
+- [v10 FSP Demo](https://huggingface.co/spaces/changcheng967/flashlm-v10-fsp-demo)
+- [v10 FSP Model](https://huggingface.co/changcheng967/flashlm-v10-fsp)
 - [v5 Thunderbolt](https://huggingface.co/changcheng967/flashlm-v5-thunderbolt) · [Demo](https://huggingface.co/spaces/changcheng967/flashlm-v5-demo)
 - [v5.2 Nova](https://huggingface.co/changcheng967/flashlm-v5.2-nova-ignition)
 - [v8.3 CORTEX](https://huggingface.co/changcheng967/flashlm-v8.3-cortex-viii)
@@ -165,22 +151,30 @@ FlashLM/
 
 ## References
 
+- [Beyond Multi-Token Prediction](https://arxiv.org/abs/2510.14751) (Mahajan et al., 2025) — FSP inspiration
 - [Gated DeltaNet](https://arxiv.org/abs/2412.15140) (Yang et al., ICLR 2025) — delta rule + gating
 - [TinyStories](https://arxiv.org/abs/2305.07759) (Eldan & Li, 2023) — tiny models, coherent text
 - [1-bit LLMs](https://arxiv.org/abs/2402.17764) (Ma et al., 2024) · [Scaling Ternary LLMs](https://aclanthology.org/2025.acl-long.1294/) (Vaidhya et al., ACL 2025)
-- [Test-Time Compute](https://arxiv.org/abs/2408.03314) (Snell et al., 2024) · [Unlikelihood](https://arxiv.org/abs/1908.04319) (Welleck et al., 2020)
 
 ---
 
 ## Citation
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20113960.svg)](https://doi.org/10.5281/zenodo.20113960)
+
+Cheng Chang. (2026). FlashLM: CPU-Native Language Models Trained From Scratch on Free-Tier Hardware. Zenodo. https://doi.org/10.5281/zenodo.20113960
+
 ```bibtex
-@misc{flashlm,
-  author = {Cheng Chang},
-  title = {FlashLM: CPU-Native Language Models},
-  year = {2026},
-  url = {https://github.com/changcheng967/FlashLM}
+@misc{chang2026flashlm,
+  author       = {Cheng Chang},
+  title        = {{FlashLM: CPU-Native Language Models Trained From Scratch on Free-Tier Hardware}},
+  year         = {2026},
+  publisher    = {Zenodo},
+  version      = {v2},
+  doi          = {10.5281/zenodo.20113960},
+  url          = {https://doi.org/10.5281/zenodo.20113960}
 }
+```
 ```
 
 MIT — see [LICENSE](LICENSE).

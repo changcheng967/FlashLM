@@ -1,0 +1,22 @@
+{
+  "best_val_ppl": 10.24,
+  "best_val_step": 2000,
+  "final_train_ce": 2.58,
+  "final_fsp_loss": 0.49,
+  "total_steps": 2405,
+  "training_minutes": 120,
+  "tokens_per_second": 2755,
+  "total_tokens_seen": 19200000,
+  "dataset": "TinyStories",
+  "optimizer": "AdamW",
+  "learning_rate": 0.0005,
+  "min_learning_rate": 0.00001,
+  "warmup_steps": 200,
+  "weight_decay": 0.1,
+  "grad_clip": 1.0,
+  "batch_size": 4,
+  "grad_accum": 8,
+  "effective_batch_size": 32,
+  "hardware": "AMD EPYC 7B13, 4 vCPU, 16GB RAM",
+  "platform": "Lightning AI free tier"
+}

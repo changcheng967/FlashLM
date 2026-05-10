@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
-v10 FSP: Future Sentence Prediction
-====================================
-Hypothesis: All 21 experiments used token-level CE alone. FSP adds a
-sentence-level planning signal — predict which words appear in the next
-64 tokens. Forces the backbone to encode future information.
+v11 WaveMemory: Multi-Timescale Memory Network
+================================================
+No layers, no attention, no FFN, no CE loss, no AdamW.
 
-Reference: "Beyond Multi-Token Prediction" (Mahajan et al., 2025)
-
-Architecture: d=256, 4L, 8H, d_ff=512, SwiGLU, RoPE (~3.7M params)
-FSP: bag-of-words prediction at subsampled positions, shared lm_head
-Loss: CE + alpha * FSP_BCE
+16 parallel memory channels with cumulative aggregation.
+Each channel: project → importance-weight → cumsum → normalize.
+Loss: Negative sampling + FSP. Optimizer: SGD + momentum.
 """
 
 import math, time, argparse, os, json
@@ -24,20 +20,17 @@ torch.set_num_threads(4)
 
 # === Hyperparameters ===
 D = 256
-D_FF = 512
-N_HEADS = 8
-N_LAYERS = 4
+N_CH = 16
 SEQ_LEN = 256
 BATCH = 4
 GRAD_ACC = 8
-LR = 5e-4
-MIN_LR = 1e-5
+LR = 1e-2
+MIN_LR = 1e-4
 WARMUP = 200
-WD = 0.1
 CLIP = 1.0
 DROP = 0.1
+NEG_K = 128
 
-# FSP
 FSP_TAU = 64
 FSP_RATE = 16
 FSP_ALPHA = 0.1
@@ -61,10 +54,8 @@ def load_data():
     with open(os.path.join(DATA_DIR, 'meta.json')) as f:
         meta = json.load(f)
     vocab = meta.get('vocab', meta.get('vocab_size', 4096))
-
     train_data = np.memmap(os.path.join(DATA_DIR, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(DATA_DIR, 'val.bin'), dtype=np.uint16, mode='r')
-
     class Dataset(torch.utils.data.Dataset):
         def __len__(self):
             return (len(train_data) - SEQ_LEN) // SEQ_LEN
@@ -73,12 +64,11 @@ def load_data():
             x = torch.from_numpy(train_data[s:s+SEQ_LEN].astype(np.int64))
             y = torch.from_numpy(train_data[s+1:s+1+SEQ_LEN].astype(np.int64))
             return x, y
-
     return tok, vocab, Dataset(), val_data
 
 
 # ============================================================================
-# MODEL COMPONENTS
+# MODEL
 # ============================================================================
 
 class RMSNorm(nn.Module):
@@ -90,79 +80,26 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.w
 
 
-class CausalSelfAttention(nn.Module):
-    def __init__(self, d, n_heads):
-        super().__init__()
-        assert d % n_heads == 0
-        self.nh = n_heads
-        self.hd = d // n_heads
-        self.qkv = nn.Linear(d, 3 * d, bias=False)
-        self.out = nn.Linear(d, d, bias=False)
-        self.drop1 = nn.Dropout(DROP)
-        self.drop2 = nn.Dropout(DROP)
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, self.hd, 2).float() / self.hd))
-        self.register_buffer('inv_freq', inv_freq)
-
-    def _rope(self, x, off=0):
-        # x: (B, T, nh, hd)
-        B, T, H, hd = x.shape
-        x = x.view(B, T, H, hd // 2, 2)
-        x1, x2 = x[..., 0], x[..., 1]  # (B, T, H, hd//2)
-        t = torch.arange(off, off + T, device=x.device, dtype=self.inv_freq.dtype)
-        f = torch.outer(t, self.inv_freq)  # (T, hd//2)
-        c = f.cos()[None, :, None, :]  # (1, T, 1, hd//2)
-        s = f.sin()[None, :, None, :]
-        return torch.stack([x1 * c - x2 * s, x1 * s + x2 * c], -1).flatten(-2)
-
-    def forward(self, x, off=0):
-        B, T, D = x.shape
-        q, k, v = self.qkv(x).view(B, T, 3, self.nh, self.hd).unbind(2)
-        q = self._rope(q, off).transpose(1, 2)
-        k = self._rope(k, off).transpose(1, 2)
-        v = v.transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.hd)
-        att.masked_fill_(torch.triu(torch.ones(T, T, device=x.device), 1).bool(), float('-inf'))
-        att = self.drop1(F.softmax(att, -1))
-        return self.drop2(self.out((att @ v).transpose(1, 2).contiguous().view(B, T, D)))
-
-
-class SwiGLU(nn.Module):
-    def __init__(self, d, d_ff):
-        super().__init__()
-        self.gate = nn.Linear(d, d_ff, bias=False)
-        self.up = nn.Linear(d, d_ff, bias=False)
-        self.down = nn.Linear(d_ff, d, bias=False)
-        self.drop = nn.Dropout(DROP)
-    def forward(self, x):
-        return self.drop(self.down(F.silu(self.gate(x)) * self.up(x)))
-
-
-class Block(nn.Module):
-    def __init__(self, d, d_ff, n_heads):
-        super().__init__()
-        self.ln1 = RMSNorm(d)
-        self.attn = CausalSelfAttention(d, n_heads)
-        self.ln2 = RMSNorm(d)
-        self.ffn = SwiGLU(d, d_ff)
-    def forward(self, x, off=0):
-        x = x + self.attn(self.ln1(x), off)
-        x = x + self.ffn(self.ln2(x))
-        return x
-
-
-# ============================================================================
-# GPT + FSP
-# ============================================================================
-
-class GPT_FSP(nn.Module):
-    def __init__(self, vocab, d, d_ff, n_heads, n_layers):
+class WaveMemory(nn.Module):
+    def __init__(self, vocab, d, n_ch):
         super().__init__()
         self.vocab = vocab
         self.d = d
+        self.n_ch = n_ch
+
         self.embed = nn.Embedding(vocab, d)
+        self.pos = nn.Embedding(SEQ_LEN, d)
         self.drop = nn.Dropout(DROP)
-        self.blocks = nn.ModuleList([Block(d, d_ff, n_heads) for _ in range(n_layers)])
+
+        self.W_proj = nn.Linear(d, n_ch * d, bias=False)
+        self.W_imp = nn.Linear(d, n_ch, bias=False)
+        self.ln_ch = nn.ModuleList([RMSNorm(d) for _ in range(n_ch)])
+
+        self.W_c1 = nn.Linear(n_ch * d, d, bias=False)
+        self.W_c2 = nn.Linear(d, d, bias=False)
+        self.W_direct = nn.Linear(d, d, bias=False)
         self.ln_f = RMSNorm(d)
+
         self.fsp_proj = nn.Linear(d, d, bias=False)
         self._init_weights()
 
@@ -173,53 +110,81 @@ class GPT_FSP(nn.Module):
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, 0, 0.02)
 
+    def _process(self, idx):
+        B, T = idx.shape
+        dev = idx.device
+        emb = self.drop(self.embed(idx) + self.pos(torch.arange(T, device=dev)))
+
+        # Project to all channels at once (one big matmul)
+        proj = self.W_proj(emb).reshape(B, T, self.n_ch, self.d)
+
+        # Per-channel importance gating
+        imp = torch.sigmoid(self.W_imp(emb)).unsqueeze(-1)  # [B, T, n_ch, 1]
+        proj = proj * imp
+
+        # Cumsum + sqrt normalization
+        proj = torch.cumsum(proj, dim=1)
+        pos = torch.arange(1, T + 1, device=dev).float().sqrt().view(1, -1, 1, 1)
+        proj = proj / (pos + 1)
+
+        # RMSNorm per channel (collect into new tensor to avoid in-place)
+        normed = torch.stack([self.ln_ch[c](proj[:, :, c, :]) for c in range(self.n_ch)], dim=2)
+        proj = normed
+
+        # Combine + residual
+        flat = proj.reshape(B, T, -1)
+        combined = F.relu(self.W_c1(flat))
+        combined = self.W_c2(combined) + self.W_direct(emb)
+        combined = self.ln_f(combined)
+        return combined
+
     def forward(self, idx, targets):
         B, T = idx.shape
-        x = self.drop(self.embed(idx))
-        for block in self.blocks:
-            x = block(x)
-        x = self.ln_f(x)
+        combined = self._process(idx)
 
-        # CE loss (weight-tied lm_head)
-        logits = F.linear(x, self.embed.weight)
-        ce_loss = F.cross_entropy(logits.view(-1, self.vocab), targets.view(-1))
+        # --- Negative sampling loss ---
+        K = NEG_K
+        negatives = torch.randint(0, self.vocab, (B, T, K), device=idx.device)
+        all_tok = torch.cat([targets.unsqueeze(-1), negatives], dim=-1)  # [B, T, K+1]
+        sel_w = self.embed.weight[all_tok]  # [B, T, K+1, d]
+        logits = torch.einsum('btd,btkd->btk', combined, sel_w)
+        labels = torch.zeros(B, T, K + 1, device=idx.device)
+        labels[:, :, 0] = 1.0
+        ns_loss = F.binary_cross_entropy_with_logits(
+            logits.reshape(-1, K + 1), labels.reshape(-1, K + 1),
+            pos_weight=torch.tensor([float(K)], device=idx.device))
 
-        # FSP loss — predict bag-of-words of future tau tokens
+        # --- FSP loss ---
         max_p = T - FSP_TAU
         if max_p <= 0:
-            return ce_loss, torch.tensor(0.0, device=idx.device)
+            return ns_loss, torch.tensor(0.0, device=idx.device)
 
         fsp_pos = torch.arange(0, max_p, FSP_RATE, device=idx.device)
         n_fsp = len(fsp_pos)
-
-        # FSP logits via shared lm_head + adapter
-        fsp_logits = F.linear(self.fsp_proj(x[:, fsp_pos]), self.embed.weight)
-
-        # BoW targets: which tokens appear in future window
+        fsp_logits = F.linear(self.fsp_proj(combined[:, fsp_pos]), self.embed.weight)
         offsets = torch.arange(FSP_TAU, device=idx.device)
         idx_mat = fsp_pos.unsqueeze(1) + offsets.unsqueeze(0)
-        future = targets[:, idx_mat]  # (B, n_fsp, tau)
-
+        future = targets[:, idx_mat]
         fsp_tgt = torch.zeros(B, n_fsp, self.vocab, device=idx.device)
         fsp_tgt.scatter_(2, future, 1.0)
-
         fsp_loss = F.binary_cross_entropy_with_logits(
             fsp_logits.reshape(-1, self.vocab),
             fsp_tgt.reshape(-1, self.vocab),
             pos_weight=torch.tensor([FSP_PW], device=idx.device))
 
-        return ce_loss, fsp_loss
+        return ns_loss, fsp_loss
+
+    def eval_forward(self, idx, targets):
+        combined = self._process(idx)
+        logits = F.linear(combined, self.embed.weight)
+        return F.cross_entropy(logits.view(-1, self.vocab), targets.view(-1))
 
     @torch.no_grad()
     def generate(self, idx, max_new, temperature=0.8, top_p=0.9):
         for _ in range(max_new):
             cond = idx[:, -SEQ_LEN:]
-            off = max(0, idx.size(1) - SEQ_LEN)
-            x = self.drop(self.embed(cond))
-            for block in self.blocks:
-                x = block(x, off)
-            x = self.ln_f(x)
-            logits = F.linear(x[:, -1], self.embed.weight) / temperature
+            combined = self._process(cond)
+            logits = F.linear(combined[:, -1], self.embed.weight) / temperature
             sl, si = torch.sort(logits, descending=True)
             cp = torch.cumsum(F.softmax(sl, -1), -1)
             rm = cp > top_p
@@ -238,25 +203,25 @@ class GPT_FSP(nn.Module):
 def train(args):
     device = torch.device('cpu')
     print(f"\n{'='*70}")
-    print(f"v10 FSP — Future Sentence Prediction")
+    print(f"v11 WaveMemory — No Layers, No Attention, No FFN, No CE, No AdamW")
     print(f"{'='*70}")
     print(f"  Device: {device} | Threads: {torch.get_num_threads()}")
 
     tokenizer, vocab, train_ds, val_data = load_data()
     print(f"  Vocab: {vocab:,} | Train tokens: {len(train_ds) * SEQ_LEN:,}")
 
-    model = GPT_FSP(vocab, D, D_FF, N_HEADS, N_LAYERS).to(device)
+    model = WaveMemory(vocab, D, N_CH).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
     n_embed = model.embed.weight.numel()
     n_fsp = model.fsp_proj.weight.numel()
     n_compute = n_params - n_embed - n_fsp
-    print(f"\n  d={D} d_ff={D_FF} heads={N_HEADS} layers={N_LAYERS}")
+    print(f"\n  d={D} channels={N_CH} | {N_CH} parallel cumsum tracks")
     print(f"  Total params: {n_params:,} ({n_params*4/1024:.0f}KB)")
     print(f"  Compute params: {n_compute:,} | Embed: {n_embed:,} | FSP: {n_fsp:,}")
-    print(f"  FSP: tau={FSP_TAU} rate={FSP_RATE} alpha={FSP_ALPHA} pos_weight={FSP_PW}")
+    print(f"  Loss: NegSample(K={NEG_K}) + {FSP_ALPHA}*FSP | Opt: SGD+momentum")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WD, betas=(0.9, 0.95))
+    optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum=0.9)
     est_steps = int(args.minutes * 60 * 2000 / (BATCH * GRAD_ACC * SEQ_LEN))
     est_steps = max(est_steps, 2000)
 
@@ -273,8 +238,6 @@ def train(args):
     best_ppl = float('inf')
     t0 = time.time()
     it = iter(loader)
-    ce_accum = 0.0
-    fsp_accum = 0.0
 
     print(f"\n  Training: {args.minutes}min | batch={BATCH}x{GRAD_ACC}")
     print(f"  LR={LR} warmup={WARMUP} | ~{est_steps} steps")
@@ -285,7 +248,7 @@ def train(args):
             break
 
         optimizer.zero_grad()
-        a_ce, a_fsp = 0.0, 0.0
+        a_ns, a_fsp = 0.0, 0.0
         for _ in range(GRAD_ACC):
             try:
                 xb, yb = next(it)
@@ -293,25 +256,24 @@ def train(args):
                 it = iter(loader)
                 xb, yb = next(it)
             xb, yb = xb.to(device), yb.to(device)
-            ce, fsp = model(xb, yb)
-            (ce + FSP_ALPHA * fsp).backward()
-            a_ce += ce.item()
+            ns, fsp = model(xb, yb)
+            (ns + FSP_ALPHA * fsp).backward()
+            a_ns += ns.item()
             a_fsp += fsp.item()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
         optimizer.step()
         scheduler.step()
         step += 1
-        ce_accum = a_ce / GRAD_ACC
+        ns_accum = a_ns / GRAD_ACC
         fsp_accum = a_fsp / GRAD_ACC
 
         if step % LOG_EVERY == 0:
-            ppl = math.exp(min(ce_accum, 10))
             lr = optimizer.param_groups[0]['lr']
             m = (time.time() - t0) / 60
             tps = step * BATCH * GRAD_ACC * SEQ_LEN / (m * 60)
-            print(f"  step {step:5d} | CE {ce_accum:.4f} PPL {ppl:8.2f} "
-                  f"FSP {fsp_accum:.3f} | LR {lr:.1e} | tok/s {tps:,.0f} | {m:.1f}m")
+            print(f"  step {step:5d} | NS {ns_accum:.4f} FSP {fsp_accum:.3f} "
+                  f"| LR {lr:.1e} | tok/s {tps:,.0f} | {m:.1f}m")
 
         if step % EVAL_EVERY == 0:
             model.eval()
@@ -325,18 +287,17 @@ def train(args):
                     yv = torch.stack([torch.from_numpy(
                         val_data[s + b * SEQ_LEN + 1: s + b * SEQ_LEN + SEQ_LEN + 1].astype(np.int64))
                         for b in range(BATCH)])
-                    ce, _ = model(xv, yv)
+                    ce = model.eval_forward(xv, yv)
                     vlosses.append(ce.item())
             vp = math.exp(min(sum(vlosses) / len(vlosses), 10))
             star = " *" if vp < best_ppl else ""
             if vp < best_ppl:
                 best_ppl = vp
-                # Save best checkpoint
                 torch.save({
                     'model': model.state_dict(),
                     'step': step,
                     'val_ppl': vp,
-                }, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fsp_best.pt'))
+                }, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wm_best.pt'))
             m = (time.time() - t0) / 60
             tps = step * BATCH * GRAD_ACC * SEQ_LEN / (m * 60)
             print(f"* EVAL step {step}: val_PPL {vp:.2f} (best {best_ppl:.2f}){star} | "

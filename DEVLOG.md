@@ -540,5 +540,110 @@ Inspired by compiler multi-pass optimization: CE operates at token level (peepho
 
 ---
 
-*Last updated: 2026-05-02*
-*Next: v14 MTP — testing whether generative auxiliary loss (predict actual future tokens) breaks the discriminative-generative gap*
+## Phase 9: FSP Breakthrough + Fully Novel Architecture (v10 FSP, v11)
+
+### v10 FSP — Future Sentence Prediction ★
+
+**The hypothesis that cracked it:** All 21 failed experiments used token-level CE as the SOLE training objective. This was identified via the Radical Innovation Protocol's "shared failed assumption" analysis.
+
+**FSP (Future Sentence Prediction):** At every 16th token position, the model predicts a bag-of-words over the next 64 tokens — "which words appear in the future window?" This forces the backbone to encode future planning information, not just local next-token prediction.
+
+- **Architecture:** Same v10.2 transformer (d=256, 4L, 8H, d_ff=512, SwiGLU, RoPE) + single `nn.Linear(256, 256)` FSP head sharing the lm_head
+- **3.74M params** (65K extra from FSP = 1.7% overhead)
+- **Loss:** CE + 0.1 * FSP_BCE (pos_weight=50 for sparsity)
+- **Training:** 2h, 4 vCPU, ~2,750 tok/s
+- **Results:**
+
+| Metric | v10.2 Baseline (CE only) | v10 FSP |
+| --- | --- | --- |
+| Val PPL | 25.08 | **10.24** |
+| Training speed | ~2,000 tok/s | ~2,750 tok/s |
+| Parameters | ~3.5M | 3.74M |
+| Extra params | — | 65K (+1.7%) |
+| Compute overhead | — | ~6% |
+
+**2.5x PPL improvement from a single linear projection sharing the lm_head.**
+
+**Generation samples:**
+- "Once upon a time, there was a little girl named Sue. Sue was very sad because she could not find her toy."
+- "A cat sat on the bed. The cat saw the cat and wanted to help. The cat jumped on the bench..."
+
+Stories are grammatically correct with named characters, dialogue, and sentence structure. But cross-sentence causal reasoning is still weak.
+
+**Key insight:** Changing the training objective mattered MORE than changing the architecture. 21 architecture experiments failed. One loss change gave 2.5x improvement.
+
+**Uploaded:** [Model](https://huggingface.co/changcheng967/flashlm-v10-fsp) · [Demo](https://huggingface.co/spaces/changcheng967/flashlm-v10-fsp-demo)
+
+---
+
+### v11 — Fully Novel CPU-Native Architecture (CumMix)
+
+After v10 FSP proved the training objective matters most, designed a fully novel architecture where EVERY component is new and CPU-optimized.
+
+#### CPU Verification Benchmarks (AMD EPYC 7B13, Zen 3, MKL)
+
+| Method | Time (us) | Notes |
+|--------|-----------|-------|
+| Python loop (recurrent) | 12,843 | Sequential baseline |
+| C kernel (naive matmul) | 27,531 | 2x slower than Python+MKL |
+| Vectorized MKL matmul | 218 | What to maximize |
+| Full attention (QKV+softmax) | 2,062 | Current approach |
+| **CumMix layer** | **136** | **15x cheaper than attention** |
+| cumsum over T=256 | 11 | Nearly free |
+
+**Key lesson:** Custom C kernels are slower than Python+MKL. The only fast CPU path is large contiguous matmuls.
+
+#### Architecture Design Iterations
+
+**v11 WaveMemory (first attempt):**
+- No layers, no attention, no FFN, no CE loss, no AdamW
+- 16 parallel cumsum channels with negative sampling loss + SGD+momentum
+- **Result:** 2,030 tok/s (slower than v10's 2,750). Loss decreased but:
+  - Negative sampling: 131K random gathers from embedding table → cache-hostile
+  - SGD+momentum: slower convergence than AdamW
+  - W_proj (256→4096): giant matmul equivalent to d_ff=4096
+
+**v11 CumMix v2 (second attempt):**
+- Replaced attention with CumMix but kept proven loss/optimizer
+- CE + FSP loss, AdamW optimizer
+- **Result:** 3,100 tok/s (13% faster than v10!) ✅
+- CE dropped 6.96→5.21 in 10 min, PPL 1055→182 — learning confirmed
+
+**v11 CumMix v3 (current — fully novel):**
+- All 6 components novel: PowerNorm + CumStepPos + CumMix + HarmonicFFN + ContrastiveCE + DualMomAdam
+- Testing in progress
+
+#### Novel Components
+
+| Component | Design | Why CPU-optimal |
+|-----------|--------|-----------------|
+| PowerNorm | Learnable Lp norm (p learned per layer) | Generalizes RMSNorm |
+| CumStepPos | Positions as cumulative random walk | cumsum = 11us |
+| CumMix | compress→cumsum→normalize→mix→expand | 15x cheaper than attention |
+| HarmonicFFN | h + sin(freq·h + phase), 2 matmuls | 33% fewer kernel launches vs SwiGLU |
+| Contrastive CE | CE + hard-negative margin (top-K hinge) | Same matmul as CE + cheap margin |
+| DualMomAdam | Fast/slow momentum with MACD crossover | Novel optimizer direction |
+
+**Parameter count:** ~3.66M (d=256, k=32, d_ff=768, 6 layers)
+**Expected speed:** ~3,100 tok/s (13% faster than v10)
+
+---
+
+## Updated Cumulative Results
+
+| Version | Architecture | Params | Hardware | Time | PPL | Coherent? | Tokens |
+|:-------:|-------------|-------:|----------|-----:|----:|:---------:|-------:|
+| **v5 Thunderbolt** | **Ternary recurrence** | **29.7M** | **7950X3D** | **40h** | **1.36** | **YES** | **massive** |
+| v7.4 CORTEX-VIII | DeltaNet + SWA | 6.6M | 2 vCPU | 2h | 2.33 | Repetitive | ~15M |
+| **v10 FSP** | **Attention + FSP** | **3.74M** | **4 vCPU** | **2h** | **10.24** | **Partial** | ~20M |
+| v11 CumMix | Fully novel CPU-native | 3.66M | 4 vCPU | 2h | Testing | — | ~22M |
+| v5.2 Nova | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No | ~3M |
+| v10.2 | + RoPE + LR fix | ~3.5M | 4 vCPU | 2h | 25.08 | No | 31M |
+| v9.6 | Standard attn + curriculum | ~4M | 4 vCPU | 2h | 101.66 | Best v9 | 1.74M |
+
+*(Previous v10-v13 standard attention experiments removed — see git history for details)*
+
+---
+
+*Last updated: 2026-05-10*
+*Next: v11 CumMix full 2h run — testing whether fully novel CPU-native architecture can beat v10 FSP's PPL 10.24*
