@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-v11 CumMix v3: Fully Novel CPU-Native Architecture
+v11 CumMix v4: Fully Novel CPU-Native Architecture
 ====================================================
 Every component is novel. Every component is designed for CPU.
 
 Components:
   Position: CumStepPos — positions as cumulative random walk (cumsum of learned steps)
   Norm:     PowerNorm — learnable Lp normalization (generalizes RMSNorm)
-  Mixing:   CumMix — compress→cumsum→normalize→mix→expand (no attention)
+  Mixing:   CumMix — compress→gate→cumsum→normalize→mix→expand (no attention)
   FFN:      HarmonicFFN — identity + learned sinusoidal perturbation (2 matmuls)
   Loss:     CE + FSP — cross-entropy + future sentence prediction (FSP novel)
-  Optim:    DualMomAdam — dual fast/slow momentum with MACD-style crossover amplification
+  Optim:    DualMomAdam — dual momentum + MACD crossover + trust-ratio clipping
 """
 
 import math, time, argparse, os, json
@@ -44,7 +44,7 @@ MARGIN_VAL = 1.0
 MARGIN_ALPHA = 0.5
 
 LOG_EVERY = 50
-EVAL_EVERY = 500
+EVAL_EVERY = 200
 GEN_EVERY = 1000
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data_v10')
@@ -64,10 +64,6 @@ def load_data():
     train_data = np.memmap(os.path.join(DATA_DIR, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(DATA_DIR, 'val.bin'), dtype=np.uint16, mode='r')
 
-    # Compute token frequencies for Token-Adaptive CE
-    counts = np.bincount(train_data, minlength=vocab).astype(np.float32)
-    tok_freq = torch.from_numpy(counts / counts.sum())
-
     class Dataset(torch.utils.data.Dataset):
         def __len__(self):
             return (len(train_data) - SEQ_LEN) // SEQ_LEN
@@ -76,7 +72,7 @@ def load_data():
             x = torch.from_numpy(train_data[s:s+SEQ_LEN].astype(np.int64))
             y = torch.from_numpy(train_data[s+1:s+1+SEQ_LEN].astype(np.int64))
             return x, y
-    return tok, vocab, Dataset(), val_data, tok_freq
+    return tok, vocab, Dataset(), val_data
 
 
 # ============================================================================
@@ -108,11 +104,12 @@ class CumStepPos(nn.Module):
 
 
 class CumMix(nn.Module):
-    """CPU-native mixing: compress→cumsum→normalize→mix→expand."""
+    """CPU-native mixing: compress→gate→cumsum→normalize→mix→expand."""
     def __init__(self, d, k):
         super().__init__()
         self.ln = PowerNorm(d)
         self.W_c = nn.Linear(d, k, bias=False)
+        self.W_g = nn.Linear(d, k, bias=False)
         self.ln_g = PowerNorm(k)
         self.W_m = nn.Linear(k, k, bias=False)
         self.W_e = nn.Linear(k, d, bias=False)
@@ -121,7 +118,8 @@ class CumMix(nn.Module):
     def forward(self, x):
         x_n = self.ln(x)
         c = F.relu(self.W_c(x_n))
-        g = torch.cumsum(c, dim=1)
+        gate = torch.sigmoid(self.W_g(x_n))
+        g = torch.cumsum(c * gate, dim=1)
         g = self.ln_g(g)
         g = self.W_m(g)
         return x + self.drop(self.W_e(g))
@@ -163,7 +161,7 @@ class Block(nn.Module):
 # ============================================================================
 
 class FlashLM_v11(nn.Module):
-    def __init__(self, vocab, d, k, d_ff, n_layers, tok_freq=None):
+    def __init__(self, vocab, d, k, d_ff, n_layers):
         super().__init__()
         self.vocab = vocab
         self.d = d
@@ -174,15 +172,8 @@ class FlashLM_v11(nn.Module):
         self.blocks = nn.ModuleList([Block(d, k, d_ff) for _ in range(n_layers)])
         self.ln_f = PowerNorm(d)
         self.fsp_proj = nn.Linear(d, d, bias=False)
-
-        # Novel: Token-Adaptive CE — frequency-weighted + learned temperature
-        if tok_freq is not None:
-            w = 1.0 / (tok_freq.sqrt() + 0.01)
-            self.register_buffer('tok_weights', w / w.mean())
-        else:
-            self.register_buffer('tok_weights', torch.ones(vocab))
-        self.log_temp = nn.Parameter(torch.tensor(0.0))  # learned softmax temp
-
+        # Focal CE: learned focusing parameter γ (γ=0 → standard CE, γ>0 → focus on hard tokens)
+        self.log_gamma = nn.Parameter(torch.tensor(0.0))  # starts at γ=1.0
         self._init_weights()
 
     def _init_weights(self):
@@ -205,16 +196,17 @@ class FlashLM_v11(nn.Module):
         dev = idx.device
         hidden = self._forward(idx)
         logits = F.linear(hidden, self.embed.weight)
-        # Novel: Token-Adaptive CE — learned temperature + frequency weighting
-        temp = self.log_temp.exp().clamp(0.1, 5.0)
-        ce = F.cross_entropy((logits / temp).view(-1, self.vocab), targets.view(-1), reduction='none')
-        w = self.tok_weights[targets.view(-1)]
-        ce_loss = (w * ce).mean()
+        # Focal CE: -(1-p_t)^γ · log(p_t), γ learned
+        gamma = self.log_gamma.exp().clamp(0.0, 5.0)
+        ce = F.cross_entropy(logits.view(-1, self.vocab), targets.view(-1), reduction='none')
+        pt = torch.exp(-ce)  # p_t for correct token
+        focal_weight = (1.0 - pt).pow(gamma)
+        focal_loss = (focal_weight * ce).mean()
 
         # --- FSP Loss ---
         max_p = T - FSP_TAU
         if max_p <= 0:
-            return ce_loss, torch.tensor(0.0, device=dev)
+            return focal_loss, torch.tensor(0.0, device=dev)
 
         fsp_pos = torch.arange(0, max_p, FSP_RATE, device=dev)
         n_fsp = len(fsp_pos)
@@ -229,7 +221,7 @@ class FlashLM_v11(nn.Module):
             fsp_tgt.reshape(-1, self.vocab),
             pos_weight=torch.tensor([FSP_PW], device=dev))
 
-        return ce_loss, fsp_loss
+        return focal_loss, fsp_loss
 
     def eval_forward(self, idx, targets):
         hidden = self._forward(idx)
@@ -259,15 +251,13 @@ class FlashLM_v11(nn.Module):
 
 class DualMomAdam(torch.optim.Optimizer):
     """
-    Dual-Momentum Adam with MACD-style crossover amplification.
+    Dual-Momentum Adam with MACD crossover and trust-ratio clipping (v4).
     Two momentum buffers (fast beta=0.9, slow beta=0.99) detect gradient trends.
-    The crossover signal amplifies or dampens the update:
-    - Fast > Slow (positive trend): 1.5x update (amplified)
-    - Fast ≈ Slow (no clear trend): 1.0x update (normal)
-    - Fast < Slow (trend reversal): 0.5x update (dampened)
+    Trust-ratio clipping limits parameter change per step to trust_clip * ||param||.
+    Only activates for explosive updates — normal updates pass through unchanged.
     """
-    def __init__(self, params, lr=5e-4, betas=(0.9, 0.99, 0.95), eps=1e-8, wd=0.1):
-        defaults = dict(lr=lr, betas=betas, eps=eps, wd=wd)
+    def __init__(self, params, lr=5e-4, betas=(0.9, 0.99, 0.95), eps=1e-8, wd=0.1, trust_clip=0.1):
+        defaults = dict(lr=lr, betas=betas, eps=eps, wd=wd, trust_clip=trust_clip)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -277,6 +267,7 @@ class DualMomAdam(torch.optim.Optimizer):
             b1, b2, bv = group['betas']
             eps = group['eps']
             wd = group['wd']
+            tc = group['trust_clip']
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -299,11 +290,21 @@ class DualMomAdam(torch.optim.Optimizer):
                 ms_hat = ms / (1 - b2 ** t)
                 v_hat = v / (1 - bv ** t)
 
-                crossover = 1.0 + 0.5 * torch.tanh(5.0 * (mf_hat - ms_hat))
+                crossover = 1.0 + 0.5 * torch.tanh(2.0 * (mf_hat - ms_hat))
                 direction = crossover * mf_hat
 
                 denom = v_hat.sqrt().add_(eps)
-                p.addcdiv_(direction, denom, value=-lr)
+                update = direction / denom
+
+                if tc > 0 and lr > 0:
+                    param_norm = p.norm()
+                    update_norm = update.norm()
+                    if param_norm > 0 and update_norm > 0:
+                        trust = (tc * param_norm / update_norm).clamp(max=1.0)
+                        update = update * trust
+
+                if lr > 0:
+                    p.add_(update, alpha=-lr)
                 if wd > 0:
                     p.add_(p, alpha=-wd * lr)
 
@@ -315,14 +316,25 @@ class DualMomAdam(torch.optim.Optimizer):
 def train(args):
     device = torch.device('cpu')
     print(f"\n{'='*70}")
-    print(f"v11 CumMix v3 — Fully Novel CPU-Native Architecture")
+    print(f"v11 CumMix v4 — Fully Novel CPU-Native Architecture")
     print(f"{'='*70}")
     print(f"  Device: {device} | Threads: {torch.get_num_threads()}")
 
-    tokenizer, vocab, train_ds, val_data, tok_freq = load_data()
+    tokenizer, vocab, train_ds, val_data = load_data()
     print(f"  Vocab: {vocab:,} | Train tokens: {len(train_ds) * SEQ_LEN:,}")
 
-    model = FlashLM_v11(vocab, D, K, D_FF, N_LAYERS, tok_freq=tok_freq).to(device)
+    model = FlashLM_v11(vocab, D, K, D_FF, N_LAYERS).to(device)
+
+    # Resume from checkpoint if requested
+    ckpt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'v11_best.pt')
+    start_step = 0
+    best_ppl_init = float('inf')
+    if args.resume and os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+        model.load_state_dict(ckpt['model'])
+        start_step = ckpt.get('step', 0)
+        best_ppl_init = ckpt.get('val_ppl', float('inf'))
+        print(f"  Resumed from step {start_step}, val_PPL {best_ppl_init:.2f}")
 
     n_params = sum(p.numel() for p in model.parameters())
     n_embed = model.embed.weight.numel()
@@ -332,8 +344,8 @@ def train(args):
     print(f"\n  d={D} k={K} d_ff={D_FF} layers={N_LAYERS}")
     print(f"  Total params: {n_params:,} ({n_params*4/1024:.0f}KB)")
     print(f"  Compute: {n_compute:,} | Embed: {n_embed:,} | Pos: {n_pos:,} | FSP: {n_fsp:,}")
-    print(f"  Novel: PowerNorm + CumStepPos + CumMix + HarmonicFFN")
-    print(f"  Novel: TACE + FSP + DualMomAdam (amplifier)")
+    print(f"  Novel: PowerNorm + CumStepPos + CumMix(gated) + HarmonicFFN")
+    print(f"  Novel: FocalCE + FSP + DualMomAdam(trust)")
 
     optimizer = DualMomAdam(model.parameters(), lr=LR, betas=(0.9, 0.99, 0.95), wd=WD)
     est_steps = int(args.minutes * 60 * 4500 / (BATCH * GRAD_ACC * SEQ_LEN))
@@ -348,9 +360,12 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_fn)
     loader = torch.utils.data.DataLoader(train_ds, batch_size=BATCH, shuffle=True, num_workers=0)
 
-    step = 0
-    best_ppl = float('inf')
+    step = start_step
+    best_ppl = best_ppl_init
     t0 = time.time()
+    # Adjust scheduler to resume from correct step
+    for _ in range(start_step):
+        scheduler.step()
     it = iter(loader)
 
     print(f"\n  Training: {args.minutes}min | batch={BATCH}x{GRAD_ACC}")
@@ -378,7 +393,49 @@ def train(args):
             a_fsp += fsp.item()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+
+        # NaN safety: skip step if loss is NaN
+        if math.isnan(a_ce) or math.isnan(a_fsp):
+            optimizer.zero_grad()
+            step += 1
+            print(f"  step {step:5d} | NaN loss — skipping step")
+            scheduler.step()
+            continue
+
         optimizer.step()
+
+        # NaN param recovery: reload from checkpoint if parameters corrupted
+        has_nan = False
+        with torch.no_grad():
+            for p in model.parameters():
+                if p.isnan().any():
+                    has_nan = True
+                    break
+        if has_nan and os.path.exists(ckpt_path):
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+            model.load_state_dict(ckpt['model'])
+            ckpt_step = ckpt.get('step', 0)
+            # Reset optimizer state (momentum buffers) to prevent re-triggering
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    if p in optimizer.state:
+                        for k in list(optimizer.state[p].keys()):
+                            if k != 'step':
+                                optimizer.state[p][k].zero_()
+            step += 1
+            print(f"  step {step:5d} | NaN params — reloaded from step {ckpt_step}, reset optimizer")
+            scheduler.step()
+            continue
+
+        # Clamp novel learned parameters after each step
+        with torch.no_grad():
+            for m in model.modules():
+                if hasattr(m, 'freq'):
+                    m.freq.clamp_(0.1, 2.0)
+                if hasattr(m, 'log_p'):
+                    m.log_p.clamp_(-1.0, 1.5)
+            model.log_gamma.clamp_(-1.0, 2.0)
+
         scheduler.step()
         step += 1
         ce_avg = a_ce / GRAD_ACC
@@ -440,5 +497,6 @@ def _generate(model, tokenizer, device):
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--minutes', type=float, default=120)
+    p.add_argument('--resume', action='store_true', help='Resume from v11_best.pt')
     args = p.parse_args()
     train(args)

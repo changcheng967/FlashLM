@@ -9,7 +9,7 @@ No GPUs · No pretraining · No standard transformer components · 30+ experimen
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20113960.svg)](https://doi.org/10.5281/zenodo.20113960)
 
-[Paper](https://doi.org/10.5281/zenodo.20113960) · [Development Log](DEVLOG.md) · [Models](https://huggingface.co/changcheng967)
+[Paper](https://doi.org/10.5281/zenodo.20113960) · [Development Log](DEVLOG.md)
 
 </div>
 
@@ -17,16 +17,16 @@ No GPUs · No pretraining · No standard transformer components · 30+ experimen
 
 ## v11 CumMix — Active
 
-A 3.66M parameter language model where **every single component is novel** and designed for CPU. No attention, no RMSNorm, no SwiGLU, no AdamW, no standard cross-entropy.
+A 3.71M parameter language model where **every single component is novel** and designed for CPU. No attention, no RMSNorm, no SwiGLU, no AdamW, no standard cross-entropy.
 
 | Component | What Standard Transformers Use | What v11 Uses Instead |
 |-----------|-------------------------------|----------------------|
 | Normalization | RMSNorm (hardcoded p=2) | **PowerNorm** — learns the exponent p per layer |
 | Position encoding | RoPE / sinusoidal lookup | **CumStepPos** — positions as cumulative random walk |
-| Token mixing | Self-attention O(n²) | **CumMix** — compress → cumsum → mix → expand O(n) |
+| Token mixing | Self-attention O(n²) | **CumMix** — compress → gate → cumsum → mix → expand O(n) |
 | Feed-forward | SwiGLU (3 matmuls) | **HarmonicFFN** — h + sin(ωh + φ) (2 matmuls) |
-| Loss function | Cross-entropy | **TACE** — frequency-weighted CE + learned temperature + FSP |
-| Optimizer | AdamW | **DualMomAdam** — dual momentum with MACD crossover |
+| Loss function | Cross-entropy | **Focal CE** + **FSP** — learned focusing + future sentence prediction |
+| Optimizer | AdamW | **DualMomAdam** — dual momentum + MACD crossover + trust-ratio clipping |
 
 ### CPU Benchmarks (AMD EPYC 7B13, PyTorch + MKL)
 
@@ -42,11 +42,16 @@ CumMix is 15x cheaper than attention per layer. 6 CumMix layers fit in the same 
 
 ### Training Status
 
-Currently training on a free 4 vCPU cloud machine (2h run). Speed: **~2,900 tok/s**.
+Currently training v4 (gated CumMix + trust-ratio DualMomAdam) on a free 4 vCPU cloud machine.
 
+**v3 Results (val PPL 32.21, 2h):**
 ```
-step  900 | CE 1.68 PPL 5.38 | tok/s 2,895 | 42m
+step 1000 | val_PPL 35.72  (no NaN)
+step 1500 | val_PPL 35.41  (NaN cycling from step ~1200)
+step 2000 | val_PPL 32.21  (best, but ~50% training time lost to NaN recovery)
 ```
+
+**v4 in progress** — adds gated cumsum (selectivity) + trust-ratio clipping (NaN prevention).
 
 ---
 
@@ -60,6 +65,7 @@ step  900 | CE 1.68 PPL 5.38 | tok/s 2,895 | 42m
 | **v10 FSP** | Attention + FSP | 3.74M | 2h | **10.24** | Partial |
 | v5.2 | Attention + RoPE | 5.0M | 2h | 10.56 | No |
 | v4 | Ternary Bolt | 4.3M | varies | 15.05 | No |
+| v11 v3 | CumMix + FSP (novel) | 3.66M | 2h | 32.21 | Partial |
 | v10 base | Attention (no FSP) | 3.74M | 2h | 25.08 | No |
 
 *v4-Large trained by community on 24-core/256GB RAM machine
@@ -100,7 +106,8 @@ v5   Thunderbolt       29.7M  PPL  1.36   ternary recurrence ← only coherent
 v5.2  Nova              5.0M  PPL 10.56   attention + RoPE
 v7.4 CORTEX-VIII        6.6M  PPL  2.33   delta rule + SWA
 v10  FSP                3.74M PPL 10.24   attention + FSP ← best 2h result
-v11  CumMix             3.66M PPL  ???    fully novel CPU-native ← active
+v11  CumMix v3          3.66M PPL 32.21   fully novel CPU-native
+v11  CumMix v4          3.71M PPL  ???    + gated cumsum + trust-ratio ← active
 ```
 
 ---
