@@ -153,14 +153,12 @@ v10/
 Cheng Chang. (2026). *FlashLM: CPU-Native Language Models Trained From Scratch on Free-Tier Hardware.* Zenodo. https://doi.org/10.5281/zenodo.20113960
 
 ```bibtex
-@misc{chang2026flashlm,
-  author       = {Cheng Chang},
-  title        = {{FlashLM: CPU-Native Language Models Trained From Scratch on Free-Tier Hardware}},
+@misc{Chang,
+  title        = {FlashLM: CPU-Native Language Models Trained From Scratch on Free-Tier Hardware},
+  author       = {Chang, Cheng},
   year         = {2026},
   publisher    = {Zenodo},
-  version      = {v2},
-  doi          = {10.5281/zenodo.20113960},
-  url          = {https://doi.org/10.5281/zenodo.20113960}
+  doi          = {10.5281/zenodo.20113960}
 }
 ```
 
