@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """
-v11 CumMix v4: Fully Novel CPU-Native Architecture
-====================================================
-Every component is novel. Every component is designed for CPU.
+v11 CumMix v6: Brain-Principle Architecture
+=============================================
+Three brain principles applied to mixing:
 
-Components:
-  Position: CumStepPos — positions as cumulative random walk (cumsum of learned steps)
-  Norm:     PowerNorm — learnable Lp normalization (generalizes RMSNorm)
-  Mixing:   CumMix — compress→gate→cumsum→normalize→mix→expand (no attention)
-  FFN:      HarmonicFFN — identity + learned sinusoidal perturbation (2 matmuls)
-  Loss:     CE + FSP — cross-entropy + future sentence prediction (FSP novel)
-  Optim:    DualMomAdam — dual momentum + MACD crossover + trust-ratio clipping
+  1. Selective forgetting — input-dependent decayed accumulation
+     (brain: hippocampal memory consolidation, forgetting irrelevant info)
+  2. Competitive memory — softmax across learned information slots
+     (brain: working memory slots with lateral inhibition, winner-take-all)
+  3. Predictive gating — only output what wasn't predicted
+     (brain: predictive coding, Friston — process surprises, not redundancies)
+
+Other novel components unchanged:
+  Position: CumStepPos — positions as cumulative random walk
+  Norm:     PowerNorm — learnable Lp normalization
+  FFN:      HarmonicFFN — identity + learned sinusoidal perturbation
+  State:    StoryState — narrative tracker at sentence boundaries
+  Loss:     FocalCE + FSP — focused cross-entropy + future sentence prediction
+  Optim:    DualMomAdam — dual momentum + MACD crossover + momentum decay
 """
 
-import math, time, argparse, os, json
+import math, time, argparse, os, json, sys
 import numpy as np
 import torch
 import torch.nn as nn
@@ -103,26 +110,137 @@ class CumStepPos(nn.Module):
         return torch.cumsum(self.steps[:T], dim=0).to(device)
 
 
-class CumMix(nn.Module):
-    """CPU-native mixing: compress→gate→cumsum→normalize→mix→expand."""
-    def __init__(self, d, k):
+N_SLOTS = 8  # number of competitive memory slots
+
+class BrainMix(nn.Module):
+    """Mixing layer built on three brain principles:
+    1. Selective forgetting: input-dependent decayed accumulation (not monotonically growing cumsum)
+    2. Competitive memory: softmax across learned information slots (winner-take-all retrieval)
+    3. Predictive gating: only output prediction errors (surprises), suppress predictable content
+    """
+    def __init__(self, d, k, n_slots=N_SLOTS):
         super().__init__()
+        self.k = k
+        self.n_slots = n_slots
+        self.slot_dim = k // n_slots
+
         self.ln = PowerNorm(d)
+
+        # Compress: what information could be stored
         self.W_c = nn.Linear(d, k, bias=False)
-        self.W_g = nn.Linear(d, k, bias=False)
+
+        # Selective forgetting: input-dependent decay rate
+        self.W_f = nn.Linear(d, k, bias=False)
+        self.forget_bias = nn.Parameter(torch.full((k,), 2.0))  # sigmoid(2) ≈ 0.88
+
+        # Selective storage: what to add to accumulation
+        self.W_s = nn.Linear(d, k, bias=False)
+
+        # Predictive gating: predict next compressed repr from past accumulation
+        self.W_pred = nn.Linear(k, k, bias=False)
+        self.surprise_bias = nn.Parameter(torch.zeros(k))
+
+        # Competitive retrieval: query + slot keys → softmax across slots
+        self.W_q = nn.Linear(d, n_slots, bias=False)
+        self.W_sk = nn.Linear(k, n_slots, bias=False)
+
+        # Output projection
         self.ln_g = PowerNorm(k)
         self.W_m = nn.Linear(k, k, bias=False)
         self.W_e = nn.Linear(k, d, bias=False)
         self.drop = nn.Dropout(DROP)
 
     def forward(self, x):
+        B, T, D = x.shape
+        dev = x.device
         x_n = self.ln(x)
-        c = F.relu(self.W_c(x_n))
-        gate = torch.sigmoid(self.W_g(x_n))
-        g = torch.cumsum(c * gate, dim=1)
+
+        # --- Compress + gates (all batched matmuls) ---
+        c = F.relu(self.W_c(x_n))                                 # [B, T, k]
+        forget = torch.sigmoid(self.W_f(x_n) + self.forget_bias)  # [B, T, k] ~0.88 init
+        store = torch.sigmoid(self.W_s(x_n))                      # [B, T, k]
+
+        # --- Decayed accumulation (sequential, cheap element-wise ops) ---
+        g_list = [store[:, 0] * c[:, 0]]
+        for t in range(1, T):
+            g_list.append(forget[:, t] * g_list[t - 1] + store[:, t] * c[:, t])
+        g = torch.stack(g_list, dim=1)
+
+        # --- Predictive surprise gating ---
+        g_prev = torch.cat([torch.zeros(B, 1, self.k, device=dev), g[:, :-1]], dim=1)
+        pred = self.W_pred(g_prev)
+        surprise = (c - pred).abs()
+        surprise_gate = torch.sigmoid(surprise + self.surprise_bias)
+        g = g * surprise_gate
+
+        # --- Competitive multi-slot retrieval ---
+        g_slots = g.reshape(B, T, self.n_slots, self.slot_dim)
+        query = self.W_q(x_n)                  # [B, T, n_slots]
+        slot_keys = self.W_sk(g)                # [B, T, n_slots]
+        scores = query * slot_keys              # [B, T, n_slots]
+        weights = F.softmax(scores, dim=-1)     # softmax across slots
+        g = (weights.unsqueeze(-1) * g_slots).reshape(B, T, self.k)
+
+        # --- Output ---
         g = self.ln_g(g)
         g = self.W_m(g)
         return x + self.drop(self.W_e(g))
+
+
+class StoryState(nn.Module):
+    """Narrative state tracker: gated recurrent state updated at sentence boundaries.
+    Tracks story-level information (characters, plot, emotions) separately from
+    token-level mixing. All matmuls batched — only cheap element-wise ops in loop.
+    """
+    def __init__(self, d, n_state, update_rate=16):
+        super().__init__()
+        self.n_state = n_state
+        self.update_rate = update_rate
+        self.compress = nn.Linear(d, n_state, bias=False)
+        self.forget_gate = nn.Linear(d, n_state, bias=False)
+        self.input_gate = nn.Linear(d, n_state, bias=False)
+        self.state_mix = nn.Linear(n_state, n_state, bias=False)
+        self.expand = nn.Linear(n_state, d, bias=False)
+        self.ln = PowerNorm(d)
+        self.drop = nn.Dropout(DROP)
+
+    def forward(self, x):
+        B, T, D = x.shape
+        S = self.update_rate
+        x_n = self.ln(x)
+
+        # Extract sentence summaries in one shot (parallel)
+        n_chunks = T // S
+        padded = x_n[:, :n_chunks * S].reshape(B, n_chunks, S, D)
+        summaries = padded.mean(dim=2)  # [B, n_chunks, D]
+
+        # Batch all matmuls (parallel)
+        forget_all = torch.sigmoid(self.forget_gate(summaries))   # [B, n_chunks, n_state]
+        input_all = torch.sigmoid(self.input_gate(summaries))     # [B, n_chunks, n_state]
+        new_all = torch.tanh(self.compress(summaries))            # [B, n_chunks, n_state]
+
+        # Sequential state update (only cheap element-wise ops)
+        state = torch.zeros(B, self.n_state, device=x.device)
+        all_states = []
+        for ci in range(n_chunks):
+            state = state * forget_all[:, ci] + new_all[:, ci] * input_all[:, ci]
+            all_states.append(state)
+
+        # Batch mix + expand (parallel)
+        states_tensor = torch.stack(all_states, dim=1)  # [B, n_chunks, n_state]
+        states_mixed = self.state_mix(states_tensor)     # one matmul
+        states_expanded = self.expand(states_mixed)       # one matmul → [B, n_chunks, D]
+
+        # Broadcast to tokens: repeat each chunk state S times
+        token_context = states_expanded.unsqueeze(2).expand(B, n_chunks, S, D)
+        token_context = token_context.reshape(B, n_chunks * S, D)
+
+        # Handle remainder tokens
+        if n_chunks * S < T:
+            last = states_expanded[:, -1:].expand(B, T - n_chunks * S, D)
+            token_context = torch.cat([token_context, last], dim=1)
+
+        return x + self.drop(token_context)
 
 
 class HarmonicFFN(nn.Module):
@@ -142,16 +260,25 @@ class HarmonicFFN(nn.Module):
         return x + self.drop(self.down(h))
 
 
+N_STATE = 48  # story state dimension per layer
+STORY_LAYERS = {3, 4, 5}  # only deeper layers track narrative
+
 class Block(nn.Module):
-    def __init__(self, d, k, d_ff):
+    def __init__(self, d, k, d_ff, layer_idx=0):
         super().__init__()
         self.ln1 = PowerNorm(d)
-        self.mix = CumMix(d, k)
+        self.mix = BrainMix(d, k)
         self.ln2 = PowerNorm(d)
         self.ffn = HarmonicFFN(d, d_ff)
+        self.has_story = layer_idx in STORY_LAYERS
+        if self.has_story:
+            self.ln_story = PowerNorm(d)
+            self.story = StoryState(d, N_STATE, update_rate=16)
 
     def forward(self, x):
         x = self.mix(self.ln1(x))
+        if self.has_story:
+            x = self.story(self.ln_story(x))
         x = self.ffn(self.ln2(x))
         return x
 
@@ -169,7 +296,7 @@ class FlashLM_v11(nn.Module):
         self.embed = nn.Embedding(vocab, d)
         self.pos = CumStepPos(SEQ_LEN, d)
         self.drop = nn.Dropout(DROP)
-        self.blocks = nn.ModuleList([Block(d, k, d_ff) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList([Block(d, k, d_ff, layer_idx=i) for i in range(n_layers)])
         self.ln_f = PowerNorm(d)
         self.fsp_proj = nn.Linear(d, d, bias=False)
         # Focal CE: learned focusing parameter γ (γ=0 → standard CE, γ>0 → focus on hard tokens)
@@ -251,13 +378,13 @@ class FlashLM_v11(nn.Module):
 
 class DualMomAdam(torch.optim.Optimizer):
     """
-    Dual-Momentum Adam with MACD crossover and trust-ratio clipping (v4).
+    Dual-Momentum Adam with MACD crossover and momentum decay (v4).
     Two momentum buffers (fast beta=0.9, slow beta=0.99) detect gradient trends.
-    Trust-ratio clipping limits parameter change per step to trust_clip * ||param||.
-    Only activates for explosive updates — normal updates pass through unchanged.
+    Momentum decay: halve momentum buffers every 100 steps to prevent
+    accumulation-driven NaN from cumsum gradient asymmetry.
     """
-    def __init__(self, params, lr=5e-4, betas=(0.9, 0.99, 0.95), eps=1e-8, wd=0.1, trust_clip=0.1):
-        defaults = dict(lr=lr, betas=betas, eps=eps, wd=wd, trust_clip=trust_clip)
+    def __init__(self, params, lr=5e-4, betas=(0.9, 0.99, 0.95), eps=1e-8, wd=0.1, decay_every=100):
+        defaults = dict(lr=lr, betas=betas, eps=eps, wd=wd, decay_every=decay_every)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -267,7 +394,7 @@ class DualMomAdam(torch.optim.Optimizer):
             b1, b2, bv = group['betas']
             eps = group['eps']
             wd = group['wd']
-            tc = group['trust_clip']
+            de = group['decay_every']
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -282,6 +409,11 @@ class DualMomAdam(torch.optim.Optimizer):
                 t = state['step']
                 mf, ms, v = state['mf'], state['ms'], state['v']
 
+                # Momentum decay: halve momentum buffers periodically
+                if de > 0 and t > 0 and t % de == 0:
+                    mf.mul_(0.5)
+                    ms.mul_(0.5)
+
                 mf.mul_(b1).add_(g, alpha=1 - b1)
                 ms.mul_(b2).add_(g, alpha=1 - b2)
                 v.mul_(bv).addcmul_(g, g, value=1 - bv)
@@ -294,17 +426,7 @@ class DualMomAdam(torch.optim.Optimizer):
                 direction = crossover * mf_hat
 
                 denom = v_hat.sqrt().add_(eps)
-                update = direction / denom
-
-                if tc > 0 and lr > 0:
-                    param_norm = p.norm()
-                    update_norm = update.norm()
-                    if param_norm > 0 and update_norm > 0:
-                        trust = (tc * param_norm / update_norm).clamp(max=1.0)
-                        update = update * trust
-
-                if lr > 0:
-                    p.add_(update, alpha=-lr)
+                p.addcdiv_(direction, denom, value=-lr)
                 if wd > 0:
                     p.add_(p, alpha=-wd * lr)
 
@@ -314,9 +436,10 @@ class DualMomAdam(torch.optim.Optimizer):
 # ============================================================================
 
 def train(args):
+    sys.stdout.reconfigure(line_buffering=True)
     device = torch.device('cpu')
     print(f"\n{'='*70}")
-    print(f"v11 CumMix v4 — Fully Novel CPU-Native Architecture")
+    print(f"v11 CumMix v6 — Brain-Principle Architecture")
     print(f"{'='*70}")
     print(f"  Device: {device} | Threads: {torch.get_num_threads()}")
 
@@ -344,10 +467,10 @@ def train(args):
     print(f"\n  d={D} k={K} d_ff={D_FF} layers={N_LAYERS}")
     print(f"  Total params: {n_params:,} ({n_params*4/1024:.0f}KB)")
     print(f"  Compute: {n_compute:,} | Embed: {n_embed:,} | Pos: {n_pos:,} | FSP: {n_fsp:,}")
-    print(f"  Novel: PowerNorm + CumStepPos + CumMix(gated) + HarmonicFFN")
-    print(f"  Novel: FocalCE + FSP + DualMomAdam(trust)")
+    print(f"  Novel: PowerNorm + CumStepPos + BrainMix(forget+predict+compete) + StoryState + HarmonicFFN")
+    print(f"  Novel: FocalCE + FSP + DualMomAdam(decay)")
 
-    optimizer = DualMomAdam(model.parameters(), lr=LR, betas=(0.9, 0.99, 0.95), wd=WD)
+    optimizer = DualMomAdam(model.parameters(), lr=LR, betas=(0.9, 0.99, 0.95), wd=WD, decay_every=100)
     est_steps = int(args.minutes * 60 * 4500 / (BATCH * GRAD_ACC * SEQ_LEN))
     est_steps = max(est_steps, 2000)
 
