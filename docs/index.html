@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlashLM — CPU-Native Language Models</title>
+<meta name="description" content="Training language models from scratch on free-tier CPUs. No GPU required.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#050505;--surface:#0c0c0c;--card:#111;--card-hover:#161616;
+  --border:#1a1a1a;--border-hover:#2a2a2a;
+  --text:#f0f0f0;--text2:#aaa;--text3:#666;
+  --blue:#3b82f6;--blue-dim:rgba(59,130,246,.12);
+  --purple:#8b5cf6;--purple-dim:rgba(139,92,246,.12);
+  --green:#10b981;--green-dim:rgba(16,185,129,.12);
+  --amber:#f59e0b;--amber-dim:rgba(245,158,11,.12);
+  --red:#ef4444;--red-dim:rgba(239,68,68,.12);
+  --cyan:#06b6d4;
+  --radius:12px;
+}
+html{scroll-behavior:smooth}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--blue);text-decoration:none;transition:color .2s}
+a:hover{color:#60a5fa}
+
+/* ===== NAV ===== */
+nav{position:fixed;top:0;width:100%;z-index:100;background:rgba(5,5,5,.7);backdrop-filter:blur(20px) saturate(180%);border-bottom:1px solid transparent;transition:border-color .3s}
+nav.scrolled{border-bottom-color:var(--border)}
+nav .nav-inner{max-width:1100px;margin:0 auto;padding:0 32px;height:56px;display:flex;align-items:center;justify-content:space-between}
+.logo{font-weight:800;font-size:17px;letter-spacing:-.3px;display:flex;align-items:center;gap:8px}
+.logo .dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+.nav-links{display:flex;gap:28px;font-size:13px;font-weight:500}
+.nav-links a{color:var(--text3);transition:color .2s}
+.nav-links a:hover{color:var(--text)}
+
+/* ===== HERO ===== */
+.hero{min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:100px 32px 60px;position:relative;overflow:hidden}
+.hero-bg{position:absolute;inset:0;background:radial-gradient(ellipse 80% 60% at 50% 40%,rgba(59,130,246,.08),transparent 60%),radial-gradient(ellipse 60% 50% at 30% 60%,rgba(139,92,246,.06),transparent 50%)}
+.hero-content{position:relative;z-index:1}
+.hero .tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--green);background:var(--green-dim);border:1px solid rgba(16,185,129,.2);border-radius:100px;padding:6px 16px;margin-bottom:28px;letter-spacing:.3px}
+.hero .tag .pulse{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.hero h1{font-size:clamp(48px,9vw,80px);font-weight:900;letter-spacing:-3px;line-height:.95;margin-bottom:20px}
+.hero h1 span{background:linear-gradient(135deg,#fff 0%,#fff 40%,var(--blue) 80%,var(--purple) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero .subtitle{font-size:clamp(16px,2.2vw,20px);color:var(--text2);max-width:520px;margin:0 auto 48px;font-weight:400;line-height:1.5}
+.hero .metrics{display:flex;gap:48px;justify-content:center;flex-wrap:wrap}
+.hero .metric{text-align:center}
+.hero .metric .value{font-size:36px;font-weight:800;letter-spacing:-1px}
+.hero .metric .value.green{color:var(--green)}
+.hero .metric .value.blue{color:var(--blue)}
+.hero .metric .value.purple{color:var(--purple)}
+.hero .metric .value.amber{color:var(--amber)}
+.hero .metric .label{font-size:12px;color:var(--text3);margin-top:4px;font-weight:500;text-transform:uppercase;letter-spacing:.5px}
+
+/* ===== SECTION ===== */
+section{max-width:1100px;margin:0 auto;padding:100px 32px}
+.section-header{margin-bottom:48px}
+.section-header h2{font-size:32px;font-weight:800;letter-spacing:-.5px;margin-bottom:8px}
+.section-header p{color:var(--text2);font-size:16px;max-width:540px}
+.section-header .accent{display:inline-block;width:32px;height:3px;border-radius:2px;background:var(--blue);margin-bottom:16px}
+
+/* ===== RESULTS TABLE ===== */
+.table-wrap{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.table-wrap table{width:100%;border-collapse:collapse;font-size:14px}
+.table-wrap th{text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);padding:14px 16px;background:var(--surface);border-bottom:1px solid var(--border)}
+.table-wrap td{padding:12px 16px;border-bottom:1px solid var(--border)}
+.table-wrap tr:last-child td{border-bottom:none}
+.table-wrap tr:hover td{background:rgba(255,255,255,.02)}
+.table-wrap tr.highlight td{background:var(--blue-dim)}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px}
+.badge-green{background:var(--green-dim);color:var(--green)}
+.badge-blue{background:var(--blue-dim);color:var(--blue)}
+.badge-red{background:var(--red-dim);color:var(--red)}
+.mono{font-family:'JetBrains Mono',monospace;font-size:13px}
+
+/* ===== ARCHITECTURE ===== */
+.arch-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:768px){.arch-grid{grid-template-columns:1fr}}
+.arch-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:border-color .3s}
+.arch-card:hover{border-color:var(--border-hover)}
+.arch-card .arch-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.arch-card .arch-header .icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px}
+.arch-card .arch-header .icon.blue{background:var(--blue-dim);color:var(--blue)}
+.arch-card .arch-header .icon.green{background:var(--green-dim);color:var(--green)}
+.arch-card .arch-header .icon.purple{background:var(--purple-dim);color:var(--purple)}
+.arch-card .arch-header h3{font-size:15px;font-weight:600}
+.arch-card .arch-header span{font-size:12px;color:var(--text3);margin-left:auto}
+.arch-code{font-family:'JetBrains Mono',monospace;font-size:12.5px;padding:20px;line-height:1.9;background:var(--surface);overflow-x:auto}
+.kw{color:var(--blue)}.fn{color:var(--green)}.cm{color:#444}.num{color:var(--amber)}.op{color:var(--text3)}
+
+/* ===== FINDINGS ===== */
+.findings-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:768px){.findings-grid{grid-template-columns:1fr}}
+.finding{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:24px;transition:border-color .3s,transform .2s}
+.finding:hover{border-color:var(--border-hover);transform:translateY(-2px)}
+.finding .f-header{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.finding .f-num{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0}
+.finding .f-num.blue{background:var(--blue-dim);color:var(--blue)}
+.finding .f-num.green{background:var(--green-dim);color:var(--green)}
+.finding .f-num.purple{background:var(--purple-dim);color:var(--purple)}
+.finding .f-num.amber{background:var(--amber-dim);color:var(--amber)}
+.finding h4{font-size:14px;font-weight:600}
+.finding p{font-size:13px;color:var(--text2);line-height:1.6}
+.finding .metric-inline{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--green);margin-top:8px}
+
+/* ===== SAMPLES ===== */
+.sample{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:12px;position:relative}
+.sample::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--blue),var(--purple));border-radius:var(--radius) var(--radius) 0 0}
+.sample .prompt{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.sample .prompt .arrow{color:var(--blue)}
+.sample .text{font-size:15px;line-height:1.8;color:var(--text2);font-style:italic}
+.sample .meta{margin-top:12px;font-size:11px;color:var(--text3);display:flex;gap:16px}
+
+/* ===== CTA ===== */
+.cta{text-align:center;padding:100px 32px;position:relative}
+.cta::before{content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);width:400px;height:400px;background:radial-gradient(circle,rgba(59,130,246,.06),transparent 70%);pointer-events:none}
+.cta h2{font-size:32px;font-weight:800;margin-bottom:12px;letter-spacing:-.5px;position:relative}
+.cta p{color:var(--text2);font-size:16px;margin-bottom:32px;position:relative}
+.cta .buttons{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;position:relative}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:12px 24px;border-radius:10px;font-size:14px;font-weight:600;transition:all .2s;font-family:inherit;cursor:pointer;border:none}
+.btn-primary{background:var(--text);color:var(--bg)}
+.btn-primary:hover{background:#ddd;transform:translateY(-1px);box-shadow:0 4px 12px rgba(255,255,255,.1);text-decoration:none;color:var(--bg)}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--text3);color:var(--text);text-decoration:none}
+
+/* ===== FOOTER ===== */
+footer{border-top:1px solid var(--border);padding:40px 32px;display:flex;justify-content:space-between;align-items:center;max-width:1100px;margin:0 auto;font-size:12px;color:var(--text3)}
+footer a{color:var(--text3)}
+footer a:hover{color:var(--text)}
+
+/* ===== SCROLL ANIMATIONS ===== */
+.fade-in{opacity:0;transform:translateY(20px);transition:opacity .6s,transform .6s}
+.fade-in.visible{opacity:1;transform:translateY(0)}
+</style>
+</head>
+<body>
+
+<nav id="nav">
+  <div class="nav-inner">
+    <div class="logo"><span class="dot"></span> FlashLM</div>
+    <div class="nav-links">
+      <a href="#results">Results</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#findings">Findings</a>
+      <a href="#samples">Samples</a>
+      <a href="https://github.com/changcheng967/FlashLM">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-content">
+    <div class="tag"><span class="pulse"></span> Open Source &middot; MIT License</div>
+    <h1><span>FlashLM</span></h1>
+    <p class="subtitle">Language models trained from scratch on free-tier CPUs. No GPU, no pretrained weights, no shortcuts.</p>
+    <div class="metrics">
+      <div class="metric"><div class="value green">$0</div><div class="label">Training Cost</div></div>
+      <div class="metric"><div class="value blue">30+</div><div class="label">Experiments</div></div>
+      <div class="metric"><div class="value purple">1.36</div><div class="label">Best PPL</div></div>
+      <div class="metric"><div class="value amber">37K</div><div class="label">Peak tok/s</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- RESULTS -->
+<section id="results">
+  <div class="section-header fade-in">
+    <div class="accent"></div>
+    <h2>Results</h2>
+    <p>30+ experiments on TinyStories (~550M tokens). All trained for 2 hours on 4 free CPU cores unless noted.</p>
+  </div>
+  <div class="table-wrap fade-in">
+    <table>
+      <thead>
+        <tr>
+          <th>Version</th>
+          <th>Architecture</th>
+          <th>Params</th>
+          <th>Val PPL &darr;</th>
+          <th>Speed</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>v5</strong> <span class="badge badge-green">40h</span></td>
+          <td>Ternary recurrence</td>
+          <td class="mono">29.7M</td>
+          <td class="mono"><strong style="color:var(--green)">1.36</strong></td>
+          <td class="mono" style="color:var(--text3)">&mdash;</td>
+        </tr>
+        <tr>
+          <td>v7.4</td>
+          <td>Gated DeltaNet + SWA</td>
+          <td class="mono">6.6M</td>
+          <td class="mono">2.33</td>
+          <td class="mono">2K</td>
+        </tr>
+        <tr>
+          <td>v10 FSP</td>
+          <td>Attention + FSP auxiliary</td>
+          <td class="mono">3.74M</td>
+          <td class="mono">10.24</td>
+          <td class="mono">2.8K</td>
+        </tr>
+        <tr>
+          <td>v6 BrainMix</td>
+          <td>Full novel components</td>
+          <td class="mono">3.9M</td>
+          <td class="mono">19.43</td>
+          <td class="mono">2.6K</td>
+        </tr>
+        <tr>
+          <td>v10 base</td>
+          <td>Standard attention</td>
+          <td class="mono">3.74M</td>
+          <td class="mono">25.08</td>
+          <td class="mono">2.8K</td>
+        </tr>
+        <tr class="highlight">
+          <td><strong>CPUFlow v2</strong></td>
+          <td><strong>CPU-native scan</strong></td>
+          <td class="mono"><strong>1.9M</strong></td>
+          <td class="mono"><strong>25.2</strong></td>
+          <td class="mono"><strong>5.7K</strong></td>
+        </tr>
+        <tr>
+          <td>CPUFlow v1</td>
+          <td>Minimal scan</td>
+          <td class="mono">1.34M</td>
+          <td class="mono"><span class="badge badge-red">329</span></td>
+          <td class="mono">37.3K</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture">
+  <div class="section-header fade-in">
+    <div class="accent"></div>
+    <h2>CPUFlow Architecture</h2>
+    <p>Designed from CPU hardware principles &mdash; not adapted from GPU designs. Every component exploits CPU advantages.</p>
+  </div>
+  <div class="arch-grid fade-in">
+    <div class="arch-card">
+      <div class="arch-header">
+        <div class="icon blue">&lambda;</div>
+        <h3>ScanBlock</h3>
+        <span>core mixing layer</span>
+      </div>
+      <div class="arch-code"><span class="kw">x_n</span> = <span class="fn">PowerNorm</span>(x)
+<span class="kw">c</span>   = <span class="fn">tanh</span>(W_v(x_n))        <span class="cm"># compress d&rarr;k</span>
+<span class="kw">g</span>   = <span class="fn">sigmoid</span>(W_g(x_n))     <span class="cm"># learned gate</span>
+<span class="kw">s</span>   = <span class="fn">cumsum</span>(c <span class="op">&odot;</span> g)       <span class="cm"># sequential scan</span>
+<span class="kw">s</span>   = W_m(<span class="fn">PowerNorm</span>(s))     <span class="cm"># self-mix</span>
+<span class="kw">x</span>   = x <span class="op">+</span> W_e(s)            <span class="cm"># expand + residual</span>
+<span class="kw">h</span>   = <span class="fn">GELU</span>(ff_up(<span class="fn">PN</span>(x)))   <span class="cm"># per-position FFN</span>
+<span class="kw">x</span>   = x <span class="op">+</span> ff_down(h)</div>
+    </div>
+    <div class="arch-card">
+      <div class="arch-header">
+        <div class="icon green">&tau;</div>
+        <h3>Latency Breakdown</h3>
+        <span>per layer, d=256</span>
+      </div>
+      <div class="arch-code"><span class="cm"># CPU-native operations</span>
+<span class="fn">cumsum</span>(T=<span class="num">256</span>)          <span class="num">11</span> &mu;s
+<span class="fn">MKL matmul</span>(256&times;64)    <span class="num">54</span> &mu;s
+<span class="fn">ScanBlock</span> (full)       <span class="num">89</span> &mu;s
+
+<span class="cm"># GPU-oriented baseline</span>
+<span class="kw">Attention</span> (softmax)   <span class="num" style="color:var(--red)">2,062</span> &mu;s
+
+<span class="cm"># Result</span>
+<span class="fn">15&times;</span> faster per layer</div>
+    </div>
+    <div class="arch-card">
+      <div class="arch-header">
+        <div class="icon purple">&pi;</div>
+        <h3>Novel Components</h3>
+        <span>replacing GPU standards</span>
+      </div>
+      <div class="arch-code"><span class="cm"># Normalization</span>
+<span class="fn">PowerNorm</span>  learns exponent <span class="kw">p</span>
+  x / (mean |x|^p)^(1/p) * w
+
+<span class="cm"># Position</span>
+<span class="fn">CumStepPos</span>  random walk
+  pos[t] = cumsum(N(0, 0.02))
+
+<span class="cm"># Loss</span>
+<span class="fn">FSP</span>  future sentence prediction
+  BCE every <span class="num">16</span> steps, &tau;=<span class="num">64</span></div>
+    </div>
+    <div class="arch-card">
+      <div class="arch-header">
+        <div class="icon blue">&micro;</div>
+        <h3>CPU Hardware Edge</h3>
+        <span>cache per thread</span>
+      </div>
+      <div class="arch-code"><span class="cm"># Why CPU wins for this design</span>
+
+<span class="kw">CPU</span>                    <span class="kw">GPU</span>
+L1: <span class="num">16 KB</span> (1 ns)       L1: <span class="num" style="color:var(--red)">0.06 KB</span> (30 ns)
+L2: <span class="num">256 KB</span> (4 ns)      L2: <span class="num" style="color:var(--red)">0.002 KB</span> (200 ns)
+
+<span class="fn">267&times;</span> more cache per thread
+<span class="fn">36&times;</span> faster serial ops
+<span class="fn">95%+</span> branch prediction</div>
+    </div>
+  </div>
+</section>
+
+<!-- FINDINGS -->
+<section id="findings">
+  <div class="section-header fade-in">
+    <div class="accent"></div>
+    <h2>Key Findings</h2>
+    <p>What we learned from 30+ experiments and 21 failed attempts.</p>
+  </div>
+  <div class="findings-grid fade-in">
+    <div class="finding">
+      <div class="f-header"><div class="f-num blue">01</div><h4>Objective &gt; Architecture</h4></div>
+      <p>Future Sentence Prediction improved perplexity 2.5&times; with only 1.7% parameter overhead. All 21 architecture-only changes failed to match this gain.</p>
+      <div class="metric-inline">FSP: 10.24 PPL vs baseline: 25.08 PPL</div>
+    </div>
+    <div class="finding">
+      <div class="f-header"><div class="f-num green">02</div><h4>Sequential &gt; Parallel (on CPU)</h4></div>
+      <p>CumMix replaces O(n&sup2;) attention with O(n) cumulative sum. The CPU prefetcher handles sequential scans natively, avoiding the memory bottleneck of attention.</p>
+      <div class="metric-inline">89 &mu;s vs 2,062 &mu;s per layer</div>
+    </div>
+    <div class="finding">
+      <div class="f-header"><div class="f-num purple">03</div><h4>Stripping &ne; Designing</h4></div>
+      <p>CPUFlow v1 stripped all GPU components and got PPL 329. Removing GPU ops without adding CPU-native learning capacity (normalization, FFN) made the model worse, not better.</p>
+      <div class="metric-inline">v1: PPL 329 &rarr; v2: PPL 25.2</div>
+    </div>
+    <div class="finding">
+      <div class="f-header"><div class="f-num amber">04</div><h4>Scale Is the Ceiling</h4></div>
+      <p>Our only coherent model required 29.7M params and 40 hours. Below ~10M, models learn vocabulary and syntax but lack narrative state capacity for coherent stories.</p>
+      <div class="metric-inline">PPL 1.36 @ 29.7M params</div>
+    </div>
+  </div>
+</section>
+
+<!-- SAMPLES -->
+<section id="samples">
+  <div class="section-header fade-in">
+    <div class="accent"></div>
+    <h2>Generated Samples</h2>
+    <p>What CPUFlow v2 produces at 1.9M parameters, PPL 25.2.</p>
+  </div>
+  <div class="fade-in">
+    <div class="sample">
+      <div class="prompt"><span class="arrow">&rarr;</span> Once upon a time</div>
+      <div class="text">Once upon a time, there was a little girl named Tim. She loved to draw a big, a big box. He loved to play with his hair. One day, a big pile of park with a big tree. Tom was red hat to the ground. The bird was sad because it was scared.</div>
+      <div class="meta"><span>CPUFlow v2 &middot; 1.9M params &middot; PPL 25.2</span></div>
+    </div>
+    <div class="sample">
+      <div class="prompt"><span class="arrow">&rarr;</span> A cat sat</div>
+      <div class="text">A cat sat down in the ground. He saw the bird in a big tree with it. The truck was very happy and said, &ldquo;Hi, I want to play with you!&rdquo; The bird played and they went to the bird and wanted to play too. But the bird were scared.</div>
+      <div class="meta"><span>CPUFlow v2 &middot; 1.9M params &middot; PPL 25.2</span></div>
+    </div>
+  </div>
+  <p style="color:var(--text3);font-size:13px;margin-top:20px;font-style:italic">Vocabulary and sentence structure are learned. Narrative coherence requires &gt;10M parameters.</p>
+</section>
+
+<!-- CTA -->
+<div class="cta">
+  <h2>Use It. Build On It.</h2>
+  <p>Everything is open source under MIT license.</p>
+  <div class="buttons">
+    <a href="https://github.com/changcheng967/FlashLM" class="btn btn-primary">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      View on GitHub
+    </a>
+    <a href="https://doi.org/10.5281/zenodo.20113960" class="btn btn-ghost">Read the Paper</a>
+  </div>
+</div>
+
+<footer>
+  <span>&copy; 2026 FlashLM &middot; Cheng Chang</span>
+  <span><a href="https://github.com/changcheng967/FlashLM">GitHub</a> &middot; <a href="https://doi.org/10.5281/zenodo.20113960">Paper</a> &middot; <a href="https://github.com/changcheng967/FlashLM/blob/main/LICENSE">MIT License</a></span>
+</footer>
+
+<script>
+// Nav scroll effect
+const nav = document.getElementById('nav');
+window.addEventListener('scroll', () => nav.classList.toggle('scrolled', window.scrollY > 20));
+
+// Fade in on scroll
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); observer.unobserve(e.target); }});
+}, { threshold: 0.1 });
+document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+</script>
+
+</body>
+</html>

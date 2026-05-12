@@ -162,14 +162,40 @@ class BrainMix(nn.Module):
         store = torch.sigmoid(self.W_s(x_n))                 # [B, T, k]
         forget_scale = torch.sigmoid(self.W_f(x_n))          # [B, T, k]
 
-        # --- Parallel decayed cumsum via exponential scaling ---
+        # --- Parallel decayed cumsum via chunked exponential scaling ---
         # g[t] = alpha * g[t-1] + input[t]
-        #      = alpha^t * cumsum(input / alpha^t)
-        alpha = torch.sigmoid(self.decay_logit).clamp(0.9, 0.999)
-        t_range = torch.arange(T, device=dev, dtype=torch.float32)
-        decay_powers = alpha ** t_range                       # [T]
-        scaled_input = store * c / decay_powers.unsqueeze(0).unsqueeze(-1)
-        g = torch.cumsum(scaled_input, dim=1) * decay_powers.unsqueeze(0).unsqueeze(-1)
+        # Use chunks of 32 to limit max scaling to 1/alpha^31 (~5x at alpha=0.95)
+        alpha = torch.sigmoid(self.decay_logit).clamp(0.9, 0.9995)
+        input_vals = store * c  # [B, T, k]
+
+        if T < 4:
+            # Too short for chunking — just use plain cumsum
+            g = torch.cumsum(input_vals, dim=1)
+        else:
+            C = min(32, T)
+            n_chunks = T // C
+            rem = T - n_chunks * C
+            t_local = torch.arange(C, device=dev, dtype=torch.float32)
+            local_powers = alpha ** t_local
+
+            chunks_out = []
+            carry = torch.zeros(B, self.k, device=dev)
+            for ci in range(n_chunks):
+                chunk = input_vals[:, ci*C:(ci+1)*C]
+                scaled = chunk / local_powers.unsqueeze(0).unsqueeze(-1)
+                accumulated = torch.cumsum(scaled, dim=1) * local_powers.unsqueeze(0).unsqueeze(-1)
+                carry_contrib = carry.unsqueeze(1) * (alpha * local_powers).unsqueeze(0).unsqueeze(-1)
+                accumulated = accumulated + carry_contrib
+                carry = accumulated[:, -1]
+                chunks_out.append(accumulated)
+
+            g = torch.cat(chunks_out, dim=1) if chunks_out else carry.unsqueeze(1).expand(B, 0, self.k)
+
+            if rem > 0:
+                g_rem = input_vals[:, n_chunks*C:]
+                g = torch.cat([g, carry.unsqueeze(1) + g_rem], dim=1)
+
+        g = torch.nan_to_num(g, nan=0.0, posinf=1e4, neginf=-1e4)
 
         # --- Input-dependent forget scaling (post-cumsum) ---
         g = g * forget_scale
@@ -217,8 +243,11 @@ class StoryState(nn.Module):
         S = self.update_rate
         x_n = self.ln(x)
 
-        # Extract sentence summaries in one shot (parallel)
+        # Handle short sequences (e.g., during generation)
         n_chunks = T // S
+        if n_chunks == 0:
+            return x  # too short for story state, pass through
+
         padded = x_n[:, :n_chunks * S].reshape(B, n_chunks, S, D)
         summaries = padded.mean(dim=2)  # [B, n_chunks, D]
 
@@ -386,10 +415,9 @@ class FlashLM_v11(nn.Module):
 
 class DualMomAdam(torch.optim.Optimizer):
     """
-    Dual-Momentum Adam with MACD crossover and momentum decay (v4).
-    Two momentum buffers (fast beta=0.9, slow beta=0.99) detect gradient trends.
-    Momentum decay: halve momentum buffers every 100 steps to prevent
-    accumulation-driven NaN from cumsum gradient asymmetry.
+    Dual-Momentum Adam with MACD crossover, AMSGrad stability, and momentum decay.
+    NaN-safe: tracks max variance (AMSGrad), decays momentum every 50 steps,
+    and uses safe decay range in BrainMix (alpha >= 0.995).
     """
     def __init__(self, params, lr=5e-4, betas=(0.9, 0.99, 0.95), eps=1e-8, wd=0.1, decay_every=100):
         defaults = dict(lr=lr, betas=betas, eps=eps, wd=wd, decay_every=decay_every)
@@ -412,6 +440,7 @@ class DualMomAdam(torch.optim.Optimizer):
                     state['mf'] = torch.zeros_like(p)
                     state['ms'] = torch.zeros_like(p)
                     state['v'] = torch.zeros_like(p)
+                    state['max_v'] = torch.zeros_like(p)
                     state['step'] = 0
                 state['step'] += 1
                 t = state['step']
@@ -430,10 +459,13 @@ class DualMomAdam(torch.optim.Optimizer):
                 ms_hat = ms / (1 - b2 ** t)
                 v_hat = v / (1 - bv ** t)
 
+                # AMSGrad: track max variance to prevent denominator collapse
+                torch.maximum(state['max_v'], v_hat, out=state['max_v'])
+                denom = state['max_v'].sqrt().add_(eps)
+
                 crossover = 1.0 + 0.5 * torch.tanh(2.0 * (mf_hat - ms_hat))
                 direction = crossover * mf_hat
 
-                denom = v_hat.sqrt().add_(eps)
                 p.addcdiv_(direction, denom, value=-lr)
                 if wd > 0:
                     p.add_(p, alpha=-wd * lr)
@@ -525,11 +557,23 @@ def train(args):
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
 
-        # NaN safety: skip step if loss is NaN
+        # NaN safety: skip step if loss or gradients are NaN
         if math.isnan(a_ce) or math.isnan(a_fsp):
             optimizer.zero_grad()
             step += 1
             print(f"  step {step:5d} | NaN loss — skipping step")
+            scheduler.step()
+            continue
+
+        has_nan_grad = False
+        for p in model.parameters():
+            if p.grad is not None and p.grad.isnan().any():
+                has_nan_grad = True
+                break
+        if has_nan_grad:
+            optimizer.zero_grad()
+            step += 1
+            print(f"  step {step:5d} | NaN gradients — skipping step")
             scheduler.step()
             continue
 
