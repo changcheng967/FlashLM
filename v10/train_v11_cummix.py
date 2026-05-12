@@ -129,9 +129,11 @@ class BrainMix(nn.Module):
         # Compress: what information could be stored
         self.W_c = nn.Linear(d, k, bias=False)
 
-        # Selective forgetting: input-dependent decay rate
+        # Selective forgetting: learned global decay (parallel via exponential scaling)
+        self.decay_logit = nn.Parameter(torch.tensor(3.0))  # sigmoid(3) ≈ 0.95
+
+        # Input-dependent forget scaling (applied post-cumsum, not during accumulation)
         self.W_f = nn.Linear(d, k, bias=False)
-        self.forget_bias = nn.Parameter(torch.full((k,), 2.0))  # sigmoid(2) ≈ 0.88
 
         # Selective storage: what to add to accumulation
         self.W_s = nn.Linear(d, k, bias=False)
@@ -156,15 +158,21 @@ class BrainMix(nn.Module):
         x_n = self.ln(x)
 
         # --- Compress + gates (all batched matmuls) ---
-        c = F.relu(self.W_c(x_n))                                 # [B, T, k]
-        forget = torch.sigmoid(self.W_f(x_n) + self.forget_bias)  # [B, T, k] ~0.88 init
-        store = torch.sigmoid(self.W_s(x_n))                      # [B, T, k]
+        c = F.relu(self.W_c(x_n))                           # [B, T, k]
+        store = torch.sigmoid(self.W_s(x_n))                 # [B, T, k]
+        forget_scale = torch.sigmoid(self.W_f(x_n))          # [B, T, k]
 
-        # --- Decayed accumulation (sequential, cheap element-wise ops) ---
-        g_list = [store[:, 0] * c[:, 0]]
-        for t in range(1, T):
-            g_list.append(forget[:, t] * g_list[t - 1] + store[:, t] * c[:, t])
-        g = torch.stack(g_list, dim=1)
+        # --- Parallel decayed cumsum via exponential scaling ---
+        # g[t] = alpha * g[t-1] + input[t]
+        #      = alpha^t * cumsum(input / alpha^t)
+        alpha = torch.sigmoid(self.decay_logit).clamp(0.9, 0.999)
+        t_range = torch.arange(T, device=dev, dtype=torch.float32)
+        decay_powers = alpha ** t_range                       # [T]
+        scaled_input = store * c / decay_powers.unsqueeze(0).unsqueeze(-1)
+        g = torch.cumsum(scaled_input, dim=1) * decay_powers.unsqueeze(0).unsqueeze(-1)
+
+        # --- Input-dependent forget scaling (post-cumsum) ---
+        g = g * forget_scale
 
         # --- Predictive surprise gating ---
         g_prev = torch.cat([torch.zeros(B, 1, self.k, device=dev), g[:, :-1]], dim=1)
