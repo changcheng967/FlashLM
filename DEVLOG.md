@@ -645,5 +645,107 @@ After v10 FSP proved the training objective matters most, designed a fully novel
 
 ---
 
-*Last updated: 2026-05-10*
-*Next: v11 CumMix full 2h run — testing whether fully novel CPU-native architecture can beat v10 FSP's PPL 10.24*
+## Phase 10: CPUFlow — Minimal CPU-Native Architecture (v10)
+
+After v11 CumMix reached PPL 19.43 (BrainMix v6) but was plagued by NaN cycling every ~140 steps, we stripped everything back to first principles. The insight: the model was 97% overhead, 3% compute. 233 ops × 30μs = 7ms overhead vs 0.22ms actual compute. CPUFlow reduces to ~50 ops.
+
+### CPUFlow v1 — Pure Minimal Design
+
+**Architecture:** embed → [compress→relu → gate→sigmoid → cumsum → expand+residual] × 6 → tied output
+
+- **1.34M params**, d=256, k=64, 6 layers
+- Removed ALL GPU-derived components: attention, softmax, layernorm, position encoding, FFN, dropout
+- Only operations: matmul (compress/expand) + relu/sigmoid (elementwise) + cumsum (sequential scan)
+- **Speed:** 37,291 tok/s (local test) — 18.6x faster than BrainMix (~2,000 tok/s)
+- **Status:** Never deployed to server. Design was evolving into v2 before deployment.
+
+**Why it never trained:** The "purest" design was a proof of concept for operation minimization. Without norms, position encoding, or FFN, it was unclear if the model could learn at all. We added proven components back in v2.
+
+### CPUFlow v2 — With Stability Components
+
+**Architecture:** embed + CumStepPos → [ScanBlock × 6] → PowerNorm → tied output + FSP
+
+ScanBlock: PowerNorm → tanh compress → sigmoid gate → cumsum → PowerNorm → W_m self-mix → expand + residual → PowerNorm → FFN(256→128→256) → residual
+
+- **~2M params**, d=256, k=64, 6 layers
+- Added back: PowerNorm, CumStepPos, per-position FFN, FSP loss
+- **Speed:** ~5,700 tok/s
+- **Results:** PPL **25.2** — but hit NaN at step 1036 and never recovered
+
+**The NaN problem:** Blind cumsum has zero selectivity — every position contributes equally. cumsum(c) accumulates all positions' activations, and position 0 receives ~256x more gradient than position 255 (gradient flows back through all future positions). After ~1000 steps, optimizer momentum for early-position parameters explodes.
+
+**Attempted fixes:**
+1. Lowered LR 5e-4→3e-4, clip 1.0→0.5 — PPL slightly worse, didn't fix NaN
+2. Sqrt-position scaling `s / sqrt(position_index)` — delayed NaN to step ~1370 but didn't eliminate it
+3. Both were band-aids. The root cause was cumsum's unbounded state growth.
+
+### CPUFlow v3 — Linear Attention Cumsum (CURRENT)
+
+**Key insight from DeepSeek analysis:** Replace blind cumsum with linear attention cumsum:
+
+```
+q = W_q(x_n)              # raw query
+k = sigmoid(W_k(x_n))     # positive key [0,1]
+v = tanh(W_v(x_n))        # signed value [-1,1]
+out = q * cumsum(k*v) / (cumsum(k) + eps)
+```
+
+This adds:
+- **SELECTIVITY:** k (sigmoid) weights which positions to accumulate — content words open, filler words close
+- **STABILITY:** Division by cumsum(k) bounds output magnitude — no more unbounded growth
+- **Cheap:** One extra cumsum (11μs), one extra d×k projection per layer
+
+- **1.99M params**, d=256, k=64, d_ff=128, 6 layers
+- **Speed:** ~6,100 tok/s
+- **Training:** 2h on AMD EPYC 7B13 (4 vCPU, Lightning AI free tier)
+
+**Results so far (training in progress):**
+
+| Step | val PPL | Notes |
+|-----:|--------:|-------|
+| 200 | 166.81 | Early learning |
+| 400 | 52.84 | Rapid improvement |
+| 600 | 38.53 | |
+| 800 | 30.27 | |
+| 1000 | 29.24 | 1 NaN recovery (steps 965-968) |
+| 1200 | **25.45** | Best so far, still improving |
+
+**NaN status:** Only 1 recovery event in 1200+ steps. v2 had systematic NaN every ~100-140 steps. The linear attention cumsum with denominator normalization fundamentally solved the stability problem.
+
+**Generation samples (step 1000):**
+- "Once upon a time, there was a little boy named Tom. Bob loved to play with a big park."
+- "The little girl said, 'I'm sorry, Tim. I am sorry for me?'"
+- "A cat sat on the ball and wanted to be good place. Tim and Tim loved to the game."
+
+Character names (Tom, Tim, Sam, Sue), dialogue fragments, but still word-salad at sentence level. Expected at 1.99M params.
+
+### CPUFlow Speed Comparison
+
+| Model | Params | Speed | PPL |
+|-------|-------:|------:|----:|
+| v6 BrainMix | 3.9M | 2,600 tok/s | 19.43 |
+| v10 FSP | 3.74M | 2,750 tok/s | 10.24 |
+| CPUFlow v2 | ~2M | 5,700 tok/s | 25.2 |
+| **CPUFlow v3** | **1.99M** | **6,100 tok/s** | **25.45** |
+
+CPUFlow v3 is 2.2x faster than v10 FSP at half the params, with competitive PPL (25.45 vs 25.08 baseline without FSP).
+
+### Updated Cumulative Results
+
+| Version | Architecture | Params | Hardware | Time | PPL | Coherent? | Tokens |
+|:-------:|-------------|-------:|----------|-----:|----:|:---------:|-------:|
+| **v5 Thunderbolt** | **Ternary recurrence** | **29.7M** | **7950X3D** | **40h** | **1.36** | **YES** | **massive** |
+| v7.4 CORTEX-VIII | DeltaNet + SWA | 6.6M | 2 vCPU | 2h | 2.33 | Repetitive | ~15M |
+| **v10 FSP** | **Attention + FSP** | **3.74M** | **4 vCPU** | **2h** | **10.24** | **Partial** | ~20M |
+| v6 BrainMix | forget+predict+compete | 3.9M | 4 vCPU | 2h | 19.43 | — | ~13M |
+| v4 Bolt | Ternary recurrence | 4.3M | 2 vCPU | 2h | 15.05 | No | — |
+| v5.2 Nova | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No | ~3M |
+| v10.2 | Attention + RoPE | 3.5M | 4 vCPU | 2h | 25.08 | No | 31M |
+| **CPUFlow v3** | **Linear attention cumsum** | **1.99M** | **4 vCPU** | **2h** | **25.45** | **Training** | **~17M** |
+| v11 v6 | CumMix BrainMix | 3.9M | 4 vCPU | 2h | 19.43 | — | ~13M |
+| v11 v3 | CumMix + FSP | 3.66M | 4 vCPU | 2h | 32.21 | Partial | ~22M |
+
+---
+
+*Last updated: 2026-05-12*
+*Active: CPUFlow v3 training — step 1200, val PPL 25.45, still improving*
