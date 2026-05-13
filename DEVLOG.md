@@ -730,22 +730,114 @@ Character names (Tom, Tim, Sam, Sue), dialogue fragments, but still word-salad a
 
 CPUFlow v3 is 2.2x faster than v10 FSP at half the params, with competitive PPL (25.45 vs 25.08 baseline without FSP).
 
+---
+
+## Phase 11 — CPUFlow v4 / v5 / v5-LN: The Breakthrough (2026-05-13)
+
+After v3 plateaued at PPL 25.00, three new architectures were tested in rapid succession.
+
+### CPUFlow v4 — Multi-Stream Bidirectional CumSum (FAILED)
+
+**Hypothesis:** Multiple streams with learned scalar decay could capture different temporal resolutions simultaneously.
+
+**Architecture:** 8 streams × 16 dims per stream, bidirectional cumsum with learned decay, no FFN, no PowerNorm, no normalization.
+
+**Result:** **PPL 311** after 10 min — completely failed.
+
+**Why it failed (three critical bugs):**
+1. **Bidirectional cumsum leaks future tokens** — backward scan lets position T see T+1 during training, but not during generation
+2. **No normalization** — cumsum values grow unboundedly through 6 layers
+3. **All 8 decay streams converged to the same value** (~0.990) — no differentiation, defeating the multi-stream purpose
+
+### CPUFlow v5 — Fused Projection + PowerNorm (NaN)
+
+**Hypothesis:** Fuse Q/K/V into one matmul, keep PowerNorm, use ReLU instead of GELU.
+
+**Architecture:** Fused d→3k projection, PowerNorm, gated normalized cumsum, self-mix, ReLU FFN, FSP.
+
+**Result:** **PPL 28.59** at step 1000 (23 min), then **NaN at step 1020**.
+
+**Key finding:** Profiling revealed PowerNorm consumed **57% of per-layer compute** (9.55ms out of 16.6ms). The `pow()` operations and 6 intermediate tensor allocations made it the dominant cost.
+
+### CPUFlow v5-LN — LayerNorm Replaces PowerNorm (BREAKTHROUGH)
+
+**Hypothesis:** Replace PowerNorm with MKL-fused LayerNorm (27x faster per op). More steps per second beats better per-step learning.
+
+**Architecture:** Same as v5 but with `nn.LayerNorm` instead of PowerNorm.
+
+**Speed comparison:**
+| Normalization | Fwd time | Fwd+Bwd time | Speed |
+|:---:|:---:|:---:|:---:|
+| PowerNorm | 4.83ms | 16.01ms | 6,100 tok/s |
+| LayerNorm | 0.18ms | 1.07ms | 7,833 tok/s |
+
+LayerNorm is **27x faster** per normalization call — a single fused MKL-DNN kernel vs 6 separate PyTorch operations.
+
+**Training trajectory (2h, 6,886 steps, zero NaN):**
+
+| Step | val PPL | Time | Notes |
+|-----:|--------:|-----:|-------|
+| 200 | 220.02 | 3.4m | |
+| 400 | 63.07 | 6.9m | |
+| 600 | 45.63 | 10.3m | |
+| 800 | 34.00 | 13.7m | |
+| 1000 | 31.83 | 17.2m | |
+| 1200 | 25.12 | 20.7m | Matches v3's best |
+| 1400 | 22.93 | 24.2m | Beats v3 |
+| 1800 | 19.36 | 31.0m | Matches BrainMix |
+| 2400 | 17.62 | 41.4m | |
+| 3400 | 13.98 | 58.9m | |
+| 6200 | **11.94** | 108m | **Best** |
+| Final | 14.11 | 120m | 6,886 steps |
+
+**Generation samples (val PPL 11.94):**
+- "Once upon a time, there was a little girl named Lily. She loved to collect the world around the forest. One day, while playing outside, she heard a noise..."
+- "A boy named Tim was playing with her ball. The cat liked to play with Tim. Tim wanted to help his toy too."
+
+Named characters (Lily, Tom, Tim), narrative structure, dialog — coherent text from 2M params trained on CPU.
+
+### Operation-Level Profiling (per layer, B=4, T=256)
+
+| Operation | Time | % |
+|-----------|------:|---:|
+| LayerNorm | 0.18ms | 3% |
+| W_proj matmul (fused Q/K/V) | 1.67ms | 26% |
+| sigmoid + tanh | 0.45ms | 7% |
+| cumsum (×2) | 0.50ms | 8% |
+| W_mix matmul | 0.30ms | 5% |
+| W_out matmul | 0.80ms | 12% |
+| FFN up matmul | 1.52ms | 23% |
+| FFN down matmul | 1.82ms | 28% |
+| **Total per layer** | **7.24ms** | |
+
+After replacing PowerNorm, compute is dominated by matmuls (94%). This means further speedup comes from C++ kernel fusion (eliminating dispatch overhead) and quantized matmuls.
+
+### CPUFlow Architecture Comparison
+
+| Model | Params | PPL | Speed | Time | NaN? |
+|-------|-------:|----:|------:|-----:|:-----:|
+| CPUFlow v1 | 1.34M | 260 | 11K | 10m | No |
+| CPUFlow v3 | 1.99M | 25.00 | 6.1K | 2h | No |
+| CPUFlow v4 | 2.0M | 311 | 3.2K | 10m | No |
+| CPUFlow v5-PN | 2.0M | 28.59 | 6.1K | 23m | Yes |
+| **CPUFlow v5-LN** | **2.0M** | **11.94** | **7.8K** | **108m** | **No** |
+
 ### Updated Cumulative Results
 
-| Version | Architecture | Params | Hardware | Time | PPL | Coherent? | Tokens |
-|:-------:|-------------|-------:|----------|-----:|----:|:---------:|-------:|
-| **v5 Thunderbolt** | **Ternary recurrence** | **29.7M** | **7950X3D** | **40h** | **1.36** | **YES** | **massive** |
-| v7.4 CORTEX-VIII | DeltaNet + SWA | 6.6M | 2 vCPU | 2h | 2.33 | Repetitive | ~15M |
-| **v10 FSP** | **Attention + FSP** | **3.74M** | **4 vCPU** | **2h** | **10.24** | **Partial** | ~20M |
-| v6 BrainMix | forget+predict+compete | 3.9M | 4 vCPU | 2h | 19.43 | — | ~13M |
-| v4 Bolt | Ternary recurrence | 4.3M | 2 vCPU | 2h | 15.05 | No | — |
-| v5.2 Nova | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No | ~3M |
-| v10.2 | Attention + RoPE | 3.5M | 4 vCPU | 2h | 25.08 | No | 31M |
-| **CPUFlow v3** | **Linear attention cumsum** | **1.99M** | **4 vCPU** | **2h** | **25.45** | **Training** | **~17M** |
-| v11 v6 | CumMix BrainMix | 3.9M | 4 vCPU | 2h | 19.43 | — | ~13M |
-| v11 v3 | CumMix + FSP | 3.66M | 4 vCPU | 2h | 32.21 | Partial | ~22M |
+| Version | Architecture | Params | Hardware | Time | PPL | Coherent? |
+|:-------:|-------------|-------:|----------|-----:|----:|:---------:|
+| **v5 Thunderbolt** | **Ternary recurrence** | **29.7M** | **7950X3D** | **40h** | **1.36** | **YES** |
+| v7.4 CORTEX-VIII | DeltaNet + SWA | 6.6M | 2 vCPU | 2h | 2.33 | Repetitive |
+| **v10 FSP** | **Attention + FSP** | **3.74M** | **4 vCPU** | **2h** | **10.24** | **Partial** |
+| **CPUFlow v5-LN** | **Fused cumsum + LN + FSP** | **2.0M** | **4 vCPU** | **2h** | **11.94** | **Yes** |
+| v5.2 Nova | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No |
+| v6 BrainMix | forget+predict+compete | 3.9M | 4 vCPU | 2h | 19.43 | — |
+| v4 Bolt | Ternary recurrence | 4.3M | 2 vCPU | 2h | 15.05 | No |
+| CPUFlow v3 | Linear attention cumsum | 1.99M | 4 vCPU | 2h | 25.00 | Partial |
+| v10.2 | Attention + RoPE | 3.5M | 4 vCPU | 2h | 25.08 | No |
+| v11 v3 | CumMix + FSP | 3.66M | 4 vCPU | 2h | 32.21 | Partial |
 
 ---
 
-*Last updated: 2026-05-12*
-*Active: CPUFlow v3 training — step 1200, val PPL 25.45, still improving*
+*Last updated: 2026-05-13*
+*Active: CPUFlow v5-LN — best CPU-native result, val PPL 11.94, 7,833 tok/s*
