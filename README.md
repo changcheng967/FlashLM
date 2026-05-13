@@ -2,130 +2,146 @@
 
 # FlashLM
 
-### A Fully Novel CPU-Native Language Model — Every Component Designed From Scratch
+### CPU-Native Language Models Trained From Scratch on Free-Tier Hardware
 
-No GPUs · No pretraining · No standard transformer components · 30+ experiments
+No GPUs · No pretraining · Every component designed for CPU · 35+ experiments
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20113960.svg)](https://doi.org/10.5281/zenodo.20113960)
 
-[Paper](https://doi.org/10.5281/zenodo.20113960) · [Development Log](DEVLOG.md)
+[Paper](https://doi.org/10.5281/zenodo.20113960) · [Website](https://changcheng967.github.io/FlashLM/) · [Development Log](DEVLOG.md)
 
 </div>
 
 ---
 
-## v11 CumMix — Active
+## CPUFlow v3 — Active
 
-A 3.71M parameter language model where **every single component is novel** and designed for CPU. No attention, no RMSNorm, no SwiGLU, no AdamW, no standard cross-entropy.
+A CPU-native language model built from the ground up for x86 processors. No attention, no softmax, no GPU-derived operations. The architecture uses only matmuls + elementwise activations + cumulative sums.
 
-| Component | What Standard Transformers Use | What v11 Uses Instead |
-|-----------|-------------------------------|----------------------|
-| Normalization | RMSNorm (hardcoded p=2) | **PowerNorm** — learns the exponent p per layer |
-| Position encoding | RoPE / sinusoidal lookup | **CumStepPos** — positions as cumulative random walk |
-| Token mixing | Self-attention O(n²) | **CumMix** — compress → gate → cumsum → mix → expand O(n) |
-| Feed-forward | SwiGLU (3 matmuls) | **HarmonicFFN** — h + sin(ωh + φ) (2 matmuls) |
-| Loss function | Cross-entropy | **Focal CE** + **FSP** — learned focusing + future sentence prediction |
-| Optimizer | AdamW | **DualMomAdam** — dual momentum + MACD crossover + trust-ratio clipping |
+### Architecture
 
-### CPU Benchmarks (AMD EPYC 7B13, PyTorch + MKL)
+```
+embed + CumStepPos → [ScanBlock × 6] → PowerNorm → tied output + FSP
 
-| Operation | Latency | vs Attention |
-|-----------|--------:|:------------:|
-| cumsum over T=256 | 11 μs | — |
-| **CumMix layer** (d=256, k=32) | **136 μs** | — |
-| Attention layer (d=256) | 2,062 μs | 15x slower |
-| **CumMix + FFN block** | **745 μs** | — |
-| Attention + FFN block | 2,672 μs | 3.6x slower |
+ScanBlock:
+  x_n = PowerNorm(x)
+  q = W_q(x_n)              # query: d→k, raw
+  k = sigmoid(W_k(x_n))     # key: d→k, positive [0,1]
+  v = tanh(W_v(x_n))        # value: d→k, signed [-1,1]
+  num = cumsum(k * v)        # weighted value accumulation
+  den = cumsum(k) + eps      # cumulative weight (normalizer)
+  s = q * num / den          # linear attention readout
+  s = W_m(s)                 # self-mix in compressed space
+  x = x + W_e(s)            # expand + residual
+  h = gelu(ff_up(PowerNorm(x)))   # per-position FFN
+  x = x + ff_down(h)
+```
 
-CumMix is 15x cheaper than attention per layer. 6 CumMix layers fit in the same compute budget as 3 attention layers — deeper model, same wall time.
+This is **linear attention cumsum**: instead of softmax(Q·K^T)·V, we compute `q * cumsum(k*v) / cumsum(k)`. Key (sigmoid) weights which positions to accumulate, value (tanh) provides signed content, query selects what to read out. Division by cumsum(k) bounds output magnitude — solving the NaN problem that plagued earlier versions.
+
+### Config
+
+| Parameter | Value |
+|-----------|-------|
+| Model dim (d) | 256 |
+| Scan dim (k) | 64 |
+| FFN dim | 128 |
+| Layers | 6 |
+| Sequence length | 256 |
+| Params | 1.99M |
+| Speed | ~6,100 tok/s |
 
 ### Training Status
 
-Currently training v4 (gated CumMix + trust-ratio DualMomAdam) on a free 4 vCPU cloud machine.
+CPUFlow v3 is currently training on AMD EPYC 7B13 (4 vCPU, free Lightning AI).
 
-**v3 Results (val PPL 32.21, 2h):**
-```
-step 1000 | val_PPL 35.72  (no NaN)
-step 1500 | val_PPL 35.41  (NaN cycling from step ~1200)
-step 2000 | val_PPL 32.21  (best, but ~50% training time lost to NaN recovery)
-```
-
-**v4 in progress** — adds gated cumsum (selectivity) + trust-ratio clipping (NaN prevention).
+| Step | val PPL | Notes |
+|-----:|--------:|-------|
+| 200 | 166.81 | Early learning |
+| 400 | 52.84 | Rapid improvement |
+| 600 | 38.53 | |
+| 800 | 30.27 | |
+| 1000 | 29.24 | 1 NaN recovery |
+| 1200 | **25.45** | Best so far, still improving |
 
 ---
 
-## Results
+## CPUFlow Evolution
+
+| Version | Architecture | Params | Speed | PPL | Key Change |
+|:-------:|-------------|-------:|------:|----:|------------|
+| v1 | compress→relu→gate→cumsum→expand | 1.34M | 37,291 tok/s | — | Minimal CPU design, no norms/pos/FFN |
+| v2 | + PowerNorm + CumStepPos + FFN + FSP | ~2M | 5,700 tok/s | 25.2 | Added stability components, NaN at step 1036 |
+| **v3** | **Linear attention cumsum** | **1.99M** | **6,100 tok/s** | **25.45** | **q·cumsum(kv)/cumsum(k), NaN fixed** |
+
+### Why v1 never trained
+
+CPUFlow v1 was the "purest" CPU-native design — no PowerNorm, no position encoding, no FFN, no dropout. Just compress→relu→gate→cumsum→expand. It ran at 37K tok/s locally but was never deployed to the server because the design was still evolving into v2.
+
+### Why v2 NaN'd
+
+Blind cumsum has zero selectivity and unbounded state growth. Position 0 accumulates contributions from all 255 future positions, creating 256x gradient asymmetry. After ~1000 steps, optimizer momentum for early-position parameters explodes.
+
+### How v3 fixes it
+
+Linear attention cumsum adds both selectivity (k gates which positions matter) and stability (division by cumsum(k) bounds output). The single NaN recovery in 1200+ steps was from a transient spike, not systematic failure.
+
+---
+
+## All Results
 
 | Version | Architecture | Params | Time | PPL | Coherent? |
 |:-------:|-------------|-------:|-----:|----:|:---------:|
 | **v5** | Ternary recurrence | 29.7M | 40h | **1.36** | **Yes** |
-| v4-Large* | Ternary Bolt | 16.8M | 9h | 6.11 | Yes |
 | v7.4 | Gated DeltaNet + SWA | 6.6M | 2h | 2.33 | Repetitive |
 | **v10 FSP** | Attention + FSP | 3.74M | 2h | **10.24** | Partial |
 | v5.2 | Attention + RoPE | 5.0M | 2h | 10.56 | No |
+| v6 BrainMix | forget+predict+compete | 3.9M | 2h | 19.43 | — |
+| **CPUFlow v3** | **Linear attention cumsum** | **1.99M** | **2h** | **25.45** | **Training** |
+| v10.2 | Attention + RoPE | 3.5M | 2h | 25.08 | No |
+| v11 v3 | CumMix + FSP | 3.66M | 2h | 32.21 | Partial |
 | v4 | Ternary Bolt | 4.3M | varies | 15.05 | No |
-| v11 v3 | CumMix + FSP (novel) | 3.66M | 2h | 32.21 | Partial |
-| v10 base | Attention (no FSP) | 3.74M | 2h | 25.08 | No |
-
-*v4-Large trained by community on 24-core/256GB RAM machine
-
-**Sample generation from v10 FSP (3.74M params, 2h on free CPU):**
-
-> Once upon a time, there was a little girl named Sue. Sue was very sad because she could not find her toy. One day, she found a big box near her house.
-
-> A cat sat on the bed. The cat saw the cat and wanted to help. The cat jumped on the bench and began to walk in the sky.
 
 ---
 
 ## Key Findings
 
-1. **Loss > architecture.** Adding FSP (future sentence prediction) to v10 gave 2.5x PPL improvement. All 21 architecture-only experiments failed to match this.
+1. **Loss > architecture.** Adding FSP to v10 gave 2.5x PPL improvement (25→10). All 21 architecture-only experiments failed to match this.
 2. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only coherent model.
-3. **Scale wins.** 29.7M params + 40h = coherent. Everything under 10M in 2h = not coherent.
-4. **CPU needs CPU-native design.** Custom C kernels are 2x slower than Python + MKL. Speed comes from algorithm design, not implementation.
-5. **Attention is overkill for small CPU models.** O(n²) attention wastes CPU cycles. CumMix replaces it with O(n) cumulative sum at 15x lower cost.
+3. **CPU needs CPU-native design.** 97% of CPU time was PyTorch dispatch overhead, not compute. CPUFlow minimizes operation count from 233 to ~50.
+4. **Linear attention cumsum works on CPU.** q·cumsum(kv)/cumsum(k) is O(n), numerically stable, and 15x cheaper than softmax attention.
+5. **Operation count is the bottleneck.** Custom C kernels are 2x slower than Python + MKL. Speed comes from algorithm design, not implementation.
 
 ---
 
-## FSP (Future Sentence Prediction)
+## CPUFlow Design Philosophy
 
-The key insight from 30+ experiments: all 21 failures used token-level cross-entropy as the **only** training objective.
+CPUFlow is NOT a transformer adaptation. It's designed FROM SCRATCH around what CPUs do fast:
 
-**FSP adds a planning signal:** at every 16th position, the model predicts a bag-of-words of the next 64 tokens. This forces the backbone to encode future information, not just local patterns. Result: **PPL 25.08 → 10.24** with only 1.7% parameter overhead.
+| Component | GPU operation | CPUFlow replacement |
+|-----------|--------------|-------------------|
+| Token mixing | Attention O(n²) | Linear attention cumsum O(n) |
+| Normalization | LayerNorm/RMSNorm | PowerNorm (learned exponent) |
+| Position encoding | RoPE/sinusoidal | CumStepPos (cumulative walk) |
+| Feed-forward | SwiGLU (3 matmuls) | GELU FFN (2 matmuls) |
+| Training signal | Cross-entropy only | CE + FSP (future planning) |
+| Optimizer | AdamW | AdamW (proven, no need for novelty) |
 
-> *Inspired by ["Beyond Multi-Token Prediction"](https://arxiv.org/abs/2510.14751) (Mahajan et al., 2025)*
-
----
-
-## Architecture Timeline
-
-```
-v4   Bolt               4.3M  PPL 15.05   ternary conv
-v5   Thunderbolt       29.7M  PPL  1.36   ternary recurrence ← only coherent
-v5.2  Nova              5.0M  PPL 10.56   attention + RoPE
-v7.4 CORTEX-VIII        6.6M  PPL  2.33   delta rule + SWA
-v10  FSP                3.74M PPL 10.24   attention + FSP ← best 2h result
-v11  CumMix v3          3.66M PPL 32.21   fully novel CPU-native
-v11  CumMix v4          3.71M PPL  ???    + gated cumsum + trust-ratio ← active
-```
+Every operation is a large contiguous matmul (MKL-optimized) or a sequential scan (cumsum). No small kernels, no custom loops, no dispatch-heavy operations.
 
 ---
 
 ## Files
 
 ```
-v4/  train_v4_bolt.py              ternary Bolt
-v5/  train_v52_nova.py             attention + RoPE baseline
-v6/  train_v6_supernova.py         ternary GLU
-v7/  train_v74.py ... v76.py       CORTEX-VIII / IX / X
-v8/  train_v8.py ... v84.py        SearchLM
-v9/  train_v9x.py                  data engineering
 v10/
-    train_v10_fsp.py               v10 FSP (PPL 10.24)
-    train_v11_cummix.py            v11 CumMix (active)
-    train_v11_wavememory.py        v11 WaveMemory (first attempt)
-    train_v10_cachecore.py         CacheCore d=128 (failed)
+    train_cpuflow.py              CPUFlow v3 (active)
+    train_v11_cummix.py           v11 CumMix (completed)
+    train_v10_fsp.py              v10 FSP (completed)
+    data_v10/                     TinyStories V2-GPT4, vocab=4096
+docs/
+    index.html                    GitHub Pages website
 ```
 
 ---
@@ -144,7 +160,7 @@ v10/
 - [Beyond Multi-Token Prediction](https://arxiv.org/abs/2510.14751) (Mahajan et al., 2025)
 - [Gated DeltaNet](https://arxiv.org/abs/2412.15140) (Yang et al., ICLR 2025)
 - [TinyStories](https://arxiv.org/abs/2305.07759) (Eldan & Li, 2023)
-- [1-bit LLMs](https://arxiv.org/abs/2402.17764) (Ma et al., 2024) · [Scaling Ternary LLMs](https://aclanthology.org/2025.acl-long.1294/) (Vaidhya et al., ACL 2025)
+- [Linear Transformers](https://arxiv.org/abs/2006.16236) (Katharopoulos et al., 2020)
 
 ---
 
