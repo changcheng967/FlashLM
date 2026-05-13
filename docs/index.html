@@ -220,12 +220,19 @@ footer a:hover{color:var(--text)}
           <td class="mono">25.08</td>
           <td class="mono">2.8K</td>
         </tr>
+        <tr>
+          <td>CPUFlow v2</td>
+          <td>CPU-native scan</td>
+          <td class="mono">1.9M</td>
+          <td class="mono">25.2</td>
+          <td class="mono">5.7K</td>
+        </tr>
         <tr class="highlight">
-          <td><strong>CPUFlow v2</strong></td>
-          <td><strong>CPU-native scan</strong></td>
-          <td class="mono"><strong>1.9M</strong></td>
-          <td class="mono"><strong>25.2</strong></td>
-          <td class="mono"><strong>5.7K</strong></td>
+          <td><strong>CPUFlow v3</strong> <span class="badge badge-green">active</span></td>
+          <td><strong>Linear attention cumsum</strong></td>
+          <td class="mono"><strong>1.99M</strong></td>
+          <td class="mono"><strong>25.45</strong></td>
+          <td class="mono"><strong>6.1K</strong></td>
         </tr>
         <tr>
           <td>CPUFlow v1</td>
@@ -254,10 +261,13 @@ footer a:hover{color:var(--text)}
         <span>core mixing layer</span>
       </div>
       <div class="arch-code"><span class="kw">x_n</span> = <span class="fn">PowerNorm</span>(x)
-<span class="kw">c</span>   = <span class="fn">tanh</span>(W_v(x_n))        <span class="cm"># compress d&rarr;k</span>
-<span class="kw">g</span>   = <span class="fn">sigmoid</span>(W_g(x_n))     <span class="cm"># learned gate</span>
-<span class="kw">s</span>   = <span class="fn">cumsum</span>(c <span class="op">&odot;</span> g)       <span class="cm"># sequential scan</span>
-<span class="kw">s</span>   = W_m(<span class="fn">PowerNorm</span>(s))     <span class="cm"># self-mix</span>
+<span class="kw">q</span>   = W_q(x_n)                <span class="cm"># query: d&rarr;k</span>
+<span class="kw">k</span>   = <span class="fn">sigmoid</span>(W_k(x_n))     <span class="cm"># key: [0,1] (selectivity)</span>
+<span class="kw">v</span>   = <span class="fn">tanh</span>(W_v(x_n))         <span class="cm"># value: [-1,1] (content)</span>
+<span class="kw">num</span> = <span class="fn">cumsum</span>(k <span class="op">&odot;</span> v)      <span class="cm"># weighted accumulation</span>
+<span class="kw">den</span> = <span class="fn">cumsum</span>(k) + eps       <span class="cm"># normalizer (stability)</span>
+<span class="kw">s</span>   = q <span class="op">*</span> num / den         <span class="cm"># linear attention readout</span>
+<span class="kw">s</span>   = W_m(s)                  <span class="cm"># self-mix</span>
 <span class="kw">x</span>   = x <span class="op">+</span> W_e(s)            <span class="cm"># expand + residual</span>
 <span class="kw">h</span>   = <span class="fn">GELU</span>(ff_up(<span class="fn">PN</span>(x)))   <span class="cm"># per-position FFN</span>
 <span class="kw">x</span>   = x <span class="op">+</span> ff_down(h)</div>
@@ -336,8 +346,8 @@ L2: <span class="num">256 KB</span> (4 ns)      L2: <span class="num" style="col
     </div>
     <div class="finding">
       <div class="f-header"><div class="f-num purple">03</div><h4>Stripping &ne; Designing</h4></div>
-      <p>CPUFlow v1 stripped all GPU components and got PPL 329. Removing GPU ops without adding CPU-native learning capacity (normalization, FFN) made the model worse, not better.</p>
-      <div class="metric-inline">v1: PPL 329 &rarr; v2: PPL 25.2</div>
+      <p>CPUFlow v1 stripped all GPU components and got PPL 329. Adding stability (PowerNorm, FFN) in v2 got to PPL 25.2 but NaN'd at step 1036. v3's linear attention cumsum fixed NaN with only 1 recovery in 1200+ steps.</p>
+      <div class="metric-inline">v1: PPL 329 &rarr; v2: PPL 25.2 &rarr; v3: PPL 25.45, stable</div>
     </div>
     <div class="finding">
       <div class="f-header"><div class="f-num amber">04</div><h4>Scale Is the Ceiling</h4></div>
@@ -352,18 +362,18 @@ L2: <span class="num">256 KB</span> (4 ns)      L2: <span class="num" style="col
   <div class="section-header fade-in">
     <div class="accent"></div>
     <h2>Generated Samples</h2>
-    <p>What CPUFlow v2 produces at 1.9M parameters, PPL 25.2.</p>
+    <p>What CPUFlow v3 produces at 1.99M parameters, PPL 25.45.</p>
   </div>
   <div class="fade-in">
     <div class="sample">
       <div class="prompt"><span class="arrow">&rarr;</span> Once upon a time</div>
-      <div class="text">Once upon a time, there was a little girl named Tim. She loved to draw a big, a big box. He loved to play with his hair. One day, a big pile of park with a big tree. Tom was red hat to the ground. The bird was sad because it was scared.</div>
-      <div class="meta"><span>CPUFlow v2 &middot; 1.9M params &middot; PPL 25.2</span></div>
+      <div class="text">Once upon a time, there was a little boy named Tom. Bob loved to play with a big park. One day, Sam had a big dog named Sue. The cat was very happy. Tim was very happy and he loved to play.</div>
+      <div class="meta"><span>CPUFlow v3 &middot; 1.99M params &middot; PPL 25.45</span></div>
     </div>
     <div class="sample">
       <div class="prompt"><span class="arrow">&rarr;</span> A cat sat</div>
-      <div class="text">A cat sat down in the ground. He saw the bird in a big tree with it. The truck was very happy and said, &ldquo;Hi, I want to play with you!&rdquo; The bird played and they went to the bird and wanted to play too. But the bird were scared.</div>
-      <div class="meta"><span>CPUFlow v2 &middot; 1.9M params &middot; PPL 25.2</span></div>
+      <div class="text">A cat sat on the ball and wanted to be good place. Tim and Tim loved to the game. Tim and his mom went to eat the park. Tim and Tim and the park, Tim was very happy and they had a good time.</div>
+      <div class="meta"><span>CPUFlow v3 &middot; 1.99M params &middot; PPL 25.45</span></div>
     </div>
   </div>
   <p style="color:var(--text3);font-size:13px;margin-top:20px;font-style:italic">Vocabulary and sentence structure are learned. Narrative coherence requires &gt;10M parameters.</p>
