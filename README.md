@@ -67,7 +67,7 @@ The ball was very fast. Tim was sad and wanted to help. He went to the dog,
 but he did not see the dog.
 ```
 
-Named characters, narrative structure, dialog — all from 2M params trained on CPU.
+Named characters and sentence-level structure, but falls apart on close reading (broken grammar, contradictions, non-sequiturs). Better than random words, not truly coherent.
 
 ---
 
@@ -98,7 +98,7 @@ Named characters, narrative structure, dialog — all from 2M params trained on 
 | **v5** | Ternary recurrence | 29.7M | 40h | **1.36** | **Yes** |
 | v7.4 | Gated DeltaNet + SWA | 6.6M | 2h | 2.33 | Repetitive |
 | **v10 FSP** | Attention + FSP | 3.74M | 2h | **10.24** | Partial |
-| **CPUFlow v5-LN** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Yes** |
+| **CPUFlow v5-LN** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Partial** |
 | v5.2 | Attention + RoPE | 5.0M | 2h | 10.56 | No |
 | v6 BrainMix | forget+predict+compete | 3.9M | 2h | 19.43 | — |
 | **CPUFlow v3** | Linear attention cumsum | 1.99M | 2h | 25.00 | Partial |
@@ -111,7 +111,7 @@ Named characters, narrative structure, dialog — all from 2M params trained on 
 ## Key Findings
 
 1. **Loss > architecture.** Adding FSP to v10 gave 2.5x PPL improvement (25→10). All 21 architecture-only experiments failed to match this.
-2. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only coherent model — until v5-LN at PPL 11.94.
+2. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only truly coherent model. v5-LN at PPL 11.94 has surface-level story structure but broken grammar.
 3. **CPU needs CPU-native design.** 97% of CPU time was PyTorch dispatch overhead, not compute. CPUFlow minimizes operation count from 233 to ~50.
 4. **Operation speed > operation cleverness.** PowerNorm (learned exponent) was 57% of compute. LayerNorm (MKL fused kernel) is 27x faster. More steps per second beats better per-step learning.
 5. **Linear attention cumsum works on CPU.** q·cumsum(kv)/cumsum(k) is O(n), numerically stable, and 15x cheaper than softmax attention.

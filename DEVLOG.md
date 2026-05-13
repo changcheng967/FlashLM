@@ -794,7 +794,7 @@ LayerNorm is **27x faster** per normalization call — a single fused MKL-DNN ke
 - "Once upon a time, there was a little girl named Lily. She loved to collect the world around the forest. One day, while playing outside, she heard a noise..."
 - "A boy named Tim was playing with her ball. The cat liked to play with Tim. Tim wanted to help his toy too."
 
-Named characters (Lily, Tom, Tim), narrative structure, dialog — coherent text from 2M params trained on CPU.
+Named characters (Lily, Tom, Tim), narrative-like sentence fragments, but broken grammar, contradictions, and non-sequiturs throughout. Not truly coherent — better than random words, worse than readable stories.
 
 ### Operation-Level Profiling (per layer, B=4, T=256)
 
@@ -829,7 +829,7 @@ After replacing PowerNorm, compute is dominated by matmuls (94%). This means fur
 | **v5 Thunderbolt** | **Ternary recurrence** | **29.7M** | **7950X3D** | **40h** | **1.36** | **YES** |
 | v7.4 CORTEX-VIII | DeltaNet + SWA | 6.6M | 2 vCPU | 2h | 2.33 | Repetitive |
 | **v10 FSP** | **Attention + FSP** | **3.74M** | **4 vCPU** | **2h** | **10.24** | **Partial** |
-| **CPUFlow v5-LN** | **Fused cumsum + LN + FSP** | **2.0M** | **4 vCPU** | **2h** | **11.94** | **Yes** |
+| **CPUFlow v5-LN** | **Fused cumsum + LN + FSP** | **2.0M** | **4 vCPU** | **2h** | **11.94** | **Partial** |
 | v5.2 Nova | Attention + RoPE | 5.0M | 2 vCPU | 2h | 10.56 | No |
 | v6 BrainMix | forget+predict+compete | 3.9M | 4 vCPU | 2h | 19.43 | — |
 | v4 Bolt | Ternary recurrence | 4.3M | 2 vCPU | 2h | 15.05 | No |
