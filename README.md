@@ -95,26 +95,31 @@ Named characters and sentence-level structure, but falls apart on close reading 
 
 | Version | Architecture | Params | Time | PPL | Coherent? |
 |:-------:|-------------|-------:|-----:|----:|:---------:|
-| **v5** | Ternary recurrence | 29.7M | 40h | **1.36** | **Yes** |
-| v7.4 | Gated DeltaNet + SWA | 6.6M | 2h | 2.33 | Repetitive |
+| **v5** | Ternary recurrence | 29.7M | 40h | **1.36** | No |
+| v7.4 | Gated DeltaNet + SWA | 6.6M | 2h | 2.33 | No |
 | **v10 FSP** | Attention + FSP | 3.74M | 2h | **10.24** | Partial |
 | **CPUFlow v5-LN** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Partial** |
 | v5.2 | Attention + RoPE | 5.0M | 2h | 10.56 | No |
-| v6 BrainMix | forget+predict+compete | 3.9M | 2h | 19.43 | — |
+| v6 BrainMix | forget+predict+compete | 3.9M | 2h | 19.43 | No |
 | **CPUFlow v3** | Linear attention cumsum | 1.99M | 2h | 25.00 | Partial |
 | v10.2 | Attention + RoPE | 3.5M | 2h | 25.08 | No |
-| v4 | Ternary Bolt | 4.3M | varies | 15.05 | No |
+| v4 | Ternary Bolt (community, 48t/7h) | 4.3M | varies | 15.05 | Partial |
 | v11 v3 | CumMix + FSP | 3.66M | 2h | 32.21 | Partial |
+| v5-LN NoFFN | v5-LN minus FFN | 1.6M | 1h | 22.75 | No |
+| v6 decay+multi | Decay cumsum + multi-token | 2.0M | 2h | 181 | No |
 
 ---
 
 ## Key Findings
 
 1. **Loss > architecture.** Adding FSP to v10 gave 2.5x PPL improvement (25→10). All 21 architecture-only experiments failed to match this.
-2. **PPL ≠ coherence.** v7.4 at PPL 2.33 generates repetitive text. v5 at PPL 1.36 (29.7M params, 40h) is the only truly coherent model. v5-LN at PPL 11.94 has surface-level story structure but broken grammar.
+2. **PPL is misleading.** Even PPL 1.36 (v5, 29.7M params, 40h) produces incoherent text ("her big tiny looked door, and she wanted"). No FlashLM model produces truly coherent generation. Community-trained v4 on 48 threads for 7+ hours gets closest — real sentence structure and dialogue, but still contradicts itself mid-story. PPL measures token prediction, not narrative coherence.
 3. **CPU needs CPU-native design.** 97% of CPU time was PyTorch dispatch overhead, not compute. CPUFlow minimizes operation count from 233 to ~50.
 4. **Operation speed > operation cleverness.** PowerNorm (learned exponent) was 57% of compute. LayerNorm (MKL fused kernel) is 27x faster. More steps per second beats better per-step learning.
 5. **Linear attention cumsum works on CPU.** q·cumsum(kv)/cumsum(k) is O(n), numerically stable, and 15x cheaper than softmax attention.
+6. **Custom C++ kernels are slower than PyTorch MKL.** Fused scan kernel in C++/AVX2 ran at 0.54x speed of pure PyTorch. MKL-optimized matmuls and vectorized ops are hard to beat with hand-written kernels.
+7. **FFN is load-bearing.** Removing FFN saves 18% compute but doubles PPL (11.94→22.75). Not worth it.
+8. **Multi-token prediction kills CPU training speed.** Output projections (D→vocab × 4) dominate compute at 8.6G FLOPs vs 1.2G for the model forward pass, causing 2.7x slowdown and PPL 181.
 
 ---
 
@@ -141,11 +146,17 @@ Every operation is a large contiguous matmul (MKL-optimized) or a sequential sca
 v10/
     train_cpuflow_v5_ln.py        CPUFlow v5-LN (current best, PPL 11.94)
     train_cpuflow_v5.py           CPUFlow v5 (PowerNorm variant, PPL 28.59)
+    train_cpuflow_v6_decay.py     CPUFlow v6 (learned decay cumsum, pending)
+    train_cpuflow_v5_ln_noffn.py  NoFFN ablation (PPL 22.75, FFN is load-bearing)
     train_cpuflow_v4.py           CPUFlow v4 (multi-stream bidirectional, failed)
     train_cpuflow.py              CPUFlow v3 (linear attention cumsum, PPL 25.00)
-    train_v11_cummix.py           v11 CumMix (completed)
+    train_v11_cummix.py           v11 CumMix (PPL 32.21)
     train_v10_fsp.py              v10 FSP (completed)
     bench_profile.py              Operation-level profiling
+    bench_quant.py                int8 quantization benchmark
+    scan_kernel.cpp               C++ fused scan kernel (0.54x PyTorch speed)
+    setup_scan.py                 Build script for C++ kernel
+    fused_scan.py                 Python autograd wrapper for C++ kernel
     data_v10/                     TinyStories V2-GPT4, vocab=4096
 docs/
     index.html                    GitHub Pages website
