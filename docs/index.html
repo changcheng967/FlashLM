@@ -45,7 +45,7 @@ nav .nav-inner{max-width:1100px;margin:0 auto;padding:0 32px;height:56px;display
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .hero h1{font-size:clamp(48px,9vw,80px);font-weight:900;letter-spacing:-3px;line-height:.95;margin-bottom:20px}
 .hero h1 span{background:linear-gradient(135deg,#fff 0%,#fff 40%,var(--blue) 80%,var(--purple) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.hero .subtitle{font-size:clamp(16px,2.2vw,20px);color:var(--text2);max-width:520px;margin:0 auto 48px;font-weight:400;line-height:1.5}
+.hero .subtitle{font-size:clamp(16px,2.2vw,20px);color:var(--text2);max-width:560px;margin:0 auto 48px;font-weight:400;line-height:1.5}
 .hero .metrics{display:flex;gap:48px;justify-content:center;flex-wrap:wrap}
 .hero .metric{text-align:center}
 .hero .metric .value{font-size:36px;font-weight:800;letter-spacing:-1px}
@@ -59,7 +59,7 @@ nav .nav-inner{max-width:1100px;margin:0 auto;padding:0 32px;height:56px;display
 section{max-width:1100px;margin:0 auto;padding:100px 32px}
 .section-header{margin-bottom:48px}
 .section-header h2{font-size:32px;font-weight:800;letter-spacing:-.5px;margin-bottom:8px}
-.section-header p{color:var(--text2);font-size:16px;max-width:540px}
+.section-header p{color:var(--text2);font-size:16px;max-width:560px}
 .section-header .accent{display:inline-block;width:32px;height:3px;border-radius:2px;background:var(--blue);margin-bottom:16px}
 
 /* ===== RESULTS TABLE ===== */
@@ -74,6 +74,7 @@ section{max-width:1100px;margin:0 auto;padding:100px 32px}
 .badge-green{background:var(--green-dim);color:var(--green)}
 .badge-blue{background:var(--blue-dim);color:var(--blue)}
 .badge-red{background:var(--red-dim);color:var(--red)}
+.badge-amber{background:var(--amber-dim);color:var(--amber)}
 .mono{font-family:'JetBrains Mono',monospace;font-size:13px}
 
 /* ===== ARCHITECTURE ===== */
@@ -102,6 +103,7 @@ section{max-width:1100px;margin:0 auto;padding:100px 32px}
 .finding .f-num.green{background:var(--green-dim);color:var(--green)}
 .finding .f-num.purple{background:var(--purple-dim);color:var(--purple)}
 .finding .f-num.amber{background:var(--amber-dim);color:var(--amber)}
+.finding .f-num.red{background:var(--red-dim);color:var(--red)}
 .finding h4{font-size:14px;font-weight:600}
 .finding p{font-size:13px;color:var(--text2);line-height:1.6}
 .finding .metric-inline{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--green);margin-top:8px}
@@ -113,6 +115,24 @@ section{max-width:1100px;margin:0 auto;padding:100px 32px}
 .sample .prompt .arrow{color:var(--blue)}
 .sample .text{font-size:15px;line-height:1.8;color:var(--text2);font-style:italic}
 .sample .meta{margin-top:12px;font-size:11px;color:var(--text3);display:flex;gap:16px}
+
+/* ===== HONEST ===== */
+.honest-box{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:32px;margin-top:32px;position:relative;overflow:hidden}
+.honest-box::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--amber),var(--red));border-radius:var(--radius) var(--radius) 0 0}
+.honest-box h3{font-size:18px;font-weight:700;margin-bottom:12px;color:var(--amber)}
+.honest-box p{font-size:14px;color:var(--text2);line-height:1.7;margin-bottom:8px}
+
+/* ===== EVOLUTION ===== */
+.evo-timeline{position:relative;padding-left:32px}
+.evo-timeline::before{content:'';position:absolute;left:11px;top:0;bottom:0;width:2px;background:var(--border)}
+.evo-item{position:relative;margin-bottom:24px;padding:16px 20px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius)}
+.evo-item::before{content:'';position:absolute;left:-27px;top:20px;width:12px;height:12px;border-radius:50%;background:var(--surface);border:2px solid var(--border)}
+.evo-item.best::before{background:var(--green);border-color:var(--green);box-shadow:0 0 8px rgba(16,185,129,.3)}
+.evo-item.current::before{background:var(--blue);border-color:var(--blue);box-shadow:0 0 8px rgba(59,130,246,.3);animation:pulse 2s infinite}
+.evo-item h4{font-size:14px;font-weight:600;margin-bottom:4px}
+.evo-item p{font-size:13px;color:var(--text2);line-height:1.5}
+.evo-item .evo-metrics{display:flex;gap:16px;margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3)}
+.evo-item .evo-metrics .evo-val{color:var(--green)}
 
 /* ===== CTA ===== */
 .cta{text-align:center;padding:100px 32px;position:relative}
@@ -144,6 +164,7 @@ footer a:hover{color:var(--text)}
     <div class="nav-links">
       <a href="#results">Results</a>
       <a href="#architecture">Architecture</a>
+      <a href="#evolution">Evolution</a>
       <a href="#findings">Findings</a>
       <a href="#samples">Samples</a>
       <a href="https://github.com/changcheng967/FlashLM">GitHub</a>
@@ -156,12 +177,12 @@ footer a:hover{color:var(--text)}
   <div class="hero-content">
     <div class="tag"><span class="pulse"></span> Open Source &middot; MIT License</div>
     <h1><span>FlashLM</span></h1>
-    <p class="subtitle">Language models trained from scratch on free-tier CPUs. No GPU, no pretrained weights, no shortcuts.</p>
+    <p class="subtitle">CPU-native language models trained from scratch on free-tier hardware. No GPU, no pretrained weights, no shortcuts. 35+ experiments, honest results.</p>
     <div class="metrics">
       <div class="metric"><div class="value green">$0</div><div class="label">Training Cost</div></div>
-      <div class="metric"><div class="value blue">30+</div><div class="label">Experiments</div></div>
-      <div class="metric"><div class="value purple">1.36</div><div class="label">Best PPL</div></div>
-      <div class="metric"><div class="value amber">37K</div><div class="label">Peak tok/s</div></div>
+      <div class="metric"><div class="value blue">35+</div><div class="label">Experiments</div></div>
+      <div class="metric"><div class="value purple">11.94</div><div class="label">Best CPU PPL</div></div>
+      <div class="metric"><div class="value amber">7.8K</div><div class="label">tok/s</div></div>
     </div>
   </div>
 </div>
@@ -170,8 +191,8 @@ footer a:hover{color:var(--text)}
 <section id="results">
   <div class="section-header fade-in">
     <div class="accent"></div>
-    <h2>Results</h2>
-    <p>30+ experiments on TinyStories (~550M tokens). All trained for 2 hours on 4 free CPU cores unless noted.</p>
+    <h2>All Results</h2>
+    <p>Every experiment on TinyStories (~550M tokens), trained for 2 hours on 4 free CPU cores unless noted.</p>
   </div>
   <div class="table-wrap fade-in">
     <table>
@@ -180,24 +201,27 @@ footer a:hover{color:var(--text)}
           <th>Version</th>
           <th>Architecture</th>
           <th>Params</th>
-          <th>Val PPL &darr;</th>
+          <th>Val PPL</th>
           <th>Speed</th>
+          <th>Coherent?</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td><strong>v5</strong> <span class="badge badge-green">40h</span></td>
+          <td><strong>v5</strong> <span class="badge badge-amber">40h</span></td>
           <td>Ternary recurrence</td>
           <td class="mono">29.7M</td>
           <td class="mono"><strong style="color:var(--green)">1.36</strong></td>
           <td class="mono" style="color:var(--text3)">&mdash;</td>
+          <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
           <td>v7.4</td>
           <td>Gated DeltaNet + SWA</td>
           <td class="mono">6.6M</td>
           <td class="mono">2.33</td>
-          <td class="mono">2K</td>
+          <td class="mono">&mdash;</td>
+          <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
           <td>v10 FSP</td>
@@ -205,13 +229,63 @@ footer a:hover{color:var(--text)}
           <td class="mono">3.74M</td>
           <td class="mono">10.24</td>
           <td class="mono">2.8K</td>
+          <td><span class="badge badge-amber">Partial</span></td>
+        </tr>
+        <tr class="highlight">
+          <td><strong>CPUFlow v5-LN</strong> <span class="badge badge-green">best</span></td>
+          <td><strong>Fused cumsum + LayerNorm + FSP</strong></td>
+          <td class="mono"><strong>2.0M</strong></td>
+          <td class="mono"><strong>11.94</strong></td>
+          <td class="mono"><strong>7.8K</strong></td>
+          <td><span class="badge badge-amber">Partial</span></td>
+        </tr>
+        <tr>
+          <td>v5.2</td>
+          <td>Attention + RoPE</td>
+          <td class="mono">5.0M</td>
+          <td class="mono">10.56</td>
+          <td class="mono">&mdash;</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
+          <td>v4</td>
+          <td>Ternary Bolt (community, 48t/7h)</td>
+          <td class="mono">4.3M</td>
+          <td class="mono">15.05</td>
+          <td class="mono">varies</td>
+          <td><span class="badge badge-amber">Partial</span></td>
+        </tr>
+        <tr>
+          <td>CPUFlow v7 warm</td>
+          <td>v5-LN + soft memory bank</td>
+          <td class="mono">2.26M</td>
+          <td class="mono">13.72</td>
+          <td class="mono">5.8K</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
+          <td>CPUFlow v7</td>
+          <td>Soft memory bank (cold)</td>
+          <td class="mono">2.26M</td>
+          <td class="mono">19.73</td>
+          <td class="mono">5.8K</td>
+          <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
           <td>v6 BrainMix</td>
-          <td>Full novel components</td>
+          <td>forget+predict+compete</td>
           <td class="mono">3.9M</td>
           <td class="mono">19.43</td>
           <td class="mono">2.6K</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
+          <td>CPUFlow v3</td>
+          <td>Linear attention cumsum</td>
+          <td class="mono">1.99M</td>
+          <td class="mono">25.00</td>
+          <td class="mono">6.1K</td>
+          <td><span class="badge badge-amber">Partial</span></td>
         </tr>
         <tr>
           <td>v10 base</td>
@@ -219,30 +293,57 @@ footer a:hover{color:var(--text)}
           <td class="mono">3.74M</td>
           <td class="mono">25.08</td>
           <td class="mono">2.8K</td>
+          <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
-          <td>CPUFlow v2</td>
-          <td>CPU-native scan</td>
-          <td class="mono">1.9M</td>
-          <td class="mono">25.2</td>
-          <td class="mono">5.7K</td>
+          <td>v11 CumMix</td>
+          <td>CumMix + FSP</td>
+          <td class="mono">3.66M</td>
+          <td class="mono">32.21</td>
+          <td class="mono">2.9K</td>
+          <td><span class="badge badge-amber">Partial</span></td>
         </tr>
-        <tr class="highlight">
-          <td><strong>CPUFlow v3</strong> <span class="badge badge-green">active</span></td>
-          <td><strong>Linear attention cumsum</strong></td>
-          <td class="mono"><strong>1.99M</strong></td>
-          <td class="mono"><strong>25.45</strong></td>
-          <td class="mono"><strong>6.1K</strong></td>
+        <tr>
+          <td>CPUFlow v5-LN NoFFN</td>
+          <td>v5-LN minus FFN</td>
+          <td class="mono">1.6M</td>
+          <td class="mono">22.75</td>
+          <td class="mono">&mdash;</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
+          <td>CPUFlow v6 decay</td>
+          <td>Decay cumsum + multi-token</td>
+          <td class="mono">2.0M</td>
+          <td class="mono">181</td>
+          <td class="mono">&mdash;</td>
+          <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
           <td>CPUFlow v1</td>
           <td>Minimal scan</td>
           <td class="mono">1.34M</td>
-          <td class="mono"><span class="badge badge-red">329</span></td>
-          <td class="mono">37.3K</td>
+          <td class="mono"><span class="badge badge-red">260</span></td>
+          <td class="mono">11K</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
+          <td>CPUFlow v4</td>
+          <td>Multi-stream bidirectional cumsum</td>
+          <td class="mono">2.0M</td>
+          <td class="mono"><span class="badge badge-red">311</span></td>
+          <td class="mono">3.2K</td>
+          <td><span class="badge badge-red">No</span></td>
         </tr>
       </tbody>
     </table>
+  </div>
+
+  <div class="honest-box fade-in">
+    <h3>Honest Assessment</h3>
+    <p><strong>No FlashLM model produces truly coherent text.</strong> Even v5 at PPL 1.36 (29.7M params, 40h training) generates incoherent output: "her big tiny looked door, and she wanted." PPL measures token-level prediction, not narrative coherence.</p>
+    <p>The community-trained v4 on 48 threads for 7+ hours gets closest with real sentence structure and dialogue, but still contradicts itself mid-story. CPUFlow v5-LN produces named characters and sentence-level grammar, but falls apart on close reading.</p>
+    <p>We believe coherence requires <strong>discrete entity tracking</strong> &mdash; something continuous-vector architectures fundamentally cannot provide. Our v8 experiment with hard argmax routing is testing this hypothesis.</p>
   </div>
 </section>
 
@@ -250,8 +351,8 @@ footer a:hover{color:var(--text)}
 <section id="architecture">
   <div class="section-header fade-in">
     <div class="accent"></div>
-    <h2>CPUFlow Architecture</h2>
-    <p>Designed from CPU hardware principles &mdash; not adapted from GPU designs. Every component exploits CPU advantages.</p>
+    <h2>CPUFlow v5-LN Architecture</h2>
+    <p>Designed from CPU hardware principles &mdash; not adapted from GPU designs. Every component uses operations where CPU excels.</p>
   </div>
   <div class="arch-grid fade-in">
     <div class="arch-card">
@@ -260,68 +361,118 @@ footer a:hover{color:var(--text)}
         <h3>ScanBlock</h3>
         <span>core mixing layer</span>
       </div>
-      <div class="arch-code"><span class="kw">x_n</span> = <span class="fn">PowerNorm</span>(x)
-<span class="kw">q</span>   = W_q(x_n)                <span class="cm"># query: d&rarr;k</span>
-<span class="kw">k</span>   = <span class="fn">sigmoid</span>(W_k(x_n))     <span class="cm"># key: [0,1] (selectivity)</span>
-<span class="kw">v</span>   = <span class="fn">tanh</span>(W_v(x_n))         <span class="cm"># value: [-1,1] (content)</span>
-<span class="kw">num</span> = <span class="fn">cumsum</span>(k <span class="op">&odot;</span> v)      <span class="cm"># weighted accumulation</span>
-<span class="kw">den</span> = <span class="fn">cumsum</span>(k) + eps       <span class="cm"># normalizer (stability)</span>
-<span class="kw">s</span>   = q <span class="op">*</span> num / den         <span class="cm"># linear attention readout</span>
-<span class="kw">s</span>   = W_m(s)                  <span class="cm"># self-mix</span>
-<span class="kw">x</span>   = x <span class="op">+</span> W_e(s)            <span class="cm"># expand + residual</span>
-<span class="kw">h</span>   = <span class="fn">GELU</span>(ff_up(<span class="fn">PN</span>(x)))   <span class="cm"># per-position FFN</span>
+      <div class="arch-code"><span class="kw">x_n</span> = <span class="fn">LayerNorm</span>(x)
+<span class="kw">h</span>   = <span class="fn">W_proj</span>(x_n)             <span class="cm"># fused: d&rarr;3k</span>
+<span class="kw">q, k, v</span> = <span class="fn">chunk</span>(h, <span class="num">3</span>)
+<span class="kw">k</span>   = <span class="fn">sigmoid</span>(k)              <span class="cm"># [0,1] position gate</span>
+<span class="kw">v</span>   = <span class="fn">tanh</span>(v)                  <span class="cm"># [-1,1] content</span>
+<span class="kw">num</span> = <span class="fn">cumsum</span>(k <span class="op">&odot;</span> v)
+<span class="kw">den</span> = <span class="fn">cumsum</span>(k) + eps
+<span class="kw">s</span>   = q <span class="op">*</span> num / den          <span class="cm"># linear attn readout</span>
+<span class="kw">s</span>   = <span class="fn">W_m</span>(s)
+<span class="kw">x</span>   = x <span class="op">+</span> <span class="fn">W_out</span>(s)
+<span class="kw">h</span>   = <span class="fn">relu</span>(ff_up(<span class="fn">LN</span>(x)))     <span class="cm"># per-position FFN</span>
 <span class="kw">x</span>   = x <span class="op">+</span> ff_down(h)</div>
     </div>
     <div class="arch-card">
       <div class="arch-header">
         <div class="icon green">&tau;</div>
-        <h3>Latency Breakdown</h3>
+        <h3>Operation Latency</h3>
         <span>per layer, d=256</span>
       </div>
-      <div class="arch-code"><span class="cm"># CPU-native operations</span>
-<span class="fn">cumsum</span>(T=<span class="num">256</span>)          <span class="num">11</span> &mu;s
-<span class="fn">MKL matmul</span>(256&times;64)    <span class="num">54</span> &mu;s
-<span class="fn">ScanBlock</span> (full)       <span class="num">89</span> &mu;s
+      <div class="arch-code"><span class="cm"># Profiling (B=4, T=256, d=256)</span>
+<span class="fn">LayerNorm</span>              <span class="num">0.18</span> ms  <span class="num">3%</span>
+<span class="fn">W_proj matmul</span>          <span class="num">1.67</span> ms  <span class="num">26%</span>
+<span class="fn">sigmoid+tanh</span>           <span class="num">0.45</span> ms  <span class="num">7%</span>
+<span class="fn">cumsum (x2)</span>            <span class="num">0.50</span> ms  <span class="num">8%</span>
+<span class="fn">W_mix matmul</span>           <span class="num">0.30</span> ms  <span class="num">5%</span>
+<span class="fn">W_out matmul</span>           <span class="num">0.80</span> ms  <span class="num">12%</span>
+<span class="fn">FFN up</span>                 <span class="num">1.52</span> ms  <span class="num">23%</span>
+<span class="fn">FFN down</span>               <span class="num">1.82</span> ms  <span class="num">28%</span>
 
-<span class="cm"># GPU-oriented baseline</span>
-<span class="kw">Attention</span> (softmax)   <span class="num" style="color:var(--red)">2,062</span> &mu;s
-
-<span class="cm"># Result</span>
-<span class="fn">15&times;</span> faster per layer</div>
+<span class="cm"># 97% of CPU time = PyTorch dispatch</span>
+<span class="cm"># 3% = actual computation</span></div>
     </div>
     <div class="arch-card">
       <div class="arch-header">
         <div class="icon purple">&pi;</div>
-        <h3>Novel Components</h3>
+        <h3>CPU vs GPU Design</h3>
         <span>replacing GPU standards</span>
       </div>
-      <div class="arch-code"><span class="cm"># Normalization</span>
-<span class="fn">PowerNorm</span>  learns exponent <span class="kw">p</span>
-  x / (mean |x|^p)^(1/p) * w
+      <div class="arch-code"><span class="cm"># GPU &rarr; CPUFlow mapping</span>
 
-<span class="cm"># Position</span>
-<span class="fn">CumStepPos</span>  random walk
-  pos[t] = cumsum(N(0, 0.02))
-
-<span class="cm"># Loss</span>
-<span class="fn">FSP</span>  future sentence prediction
-  BCE every <span class="num">16</span> steps, &tau;=<span class="num">64</span></div>
+<span class="kw">Attention</span> O(n&sup2;)  &rarr;  <span class="fn">cumsum</span> O(n)
+<span class="kw">RoPE</span>             &rarr;  <span class="fn">CumStepPos</span> (walk)
+<span class="kw">SwiGLU</span> (3 matmul) &rarr;  <span class="fn">ReLU FFN</span> (2 matmul)
+<span class="kw">Separate Q/K/V</span>   &rarr;  <span class="fn">Fused Q/K/V</span> (1 matmul)
+<span class="kw">CE only</span>          &rarr;  <span class="fn">CE + FSP</span> (future planning)
+<span class="kw">KV cache</span>         &rarr;  <span class="fn">Argmax routing</span> (v8+)</div>
     </div>
     <div class="arch-card">
       <div class="arch-header">
         <div class="icon blue">&micro;</div>
-        <h3>CPU Hardware Edge</h3>
-        <span>cache per thread</span>
+        <h3>FSP Training Signal</h3>
+        <span>2.5x PPL improvement</span>
       </div>
-      <div class="arch-code"><span class="cm"># Why CPU wins for this design</span>
+      <div class="arch-code"><span class="cm"># Future Sentence Prediction</span>
+<span class="cm"># Every 16 positions, predict the</span>
+<span class="cm"># SET of tokens in next 64 positions</span>
 
-<span class="kw">CPU</span>                    <span class="kw">GPU</span>
-L1: <span class="num">16 KB</span> (1 ns)       L1: <span class="num" style="color:var(--red)">0.06 KB</span> (30 ns)
-L2: <span class="num">256 KB</span> (4 ns)      L2: <span class="num" style="color:var(--red)">0.002 KB</span> (200 ns)
+<span class="kw">target</span>[pos] = <span class="fn">multi_hot</span>(tokens[pos:pos+<span class="num">64</span>])
+<span class="kw">loss</span> = <span class="fn">BCE</span>(logit, target, pw=<span class="num">50</span>)
 
-<span class="fn">267&times;</span> more cache per thread
-<span class="fn">36&times;</span> faster serial ops
-<span class="fn">95%+</span> branch prediction</div>
+<span class="cm"># vs multi-token prediction:</span>
+<span class="cm"># predict EXACT tokens at t+1..t+N</span>
+<span class="cm"># (killed CPU speed, PPL 181)</span>
+
+<span class="cm"># FSP: cheaper, same PPL gain</span>
+<span class="num">25.08</span> &rarr; <span class="num">10.24</span> PPL (<span class="num">2.5x</span>)</div>
+    </div>
+  </div>
+</section>
+
+<!-- EVOLUTION -->
+<section id="evolution">
+  <div class="section-header fade-in">
+    <div class="accent"></div>
+    <h2>CPUFlow Evolution</h2>
+    <p>From minimal scan to discrete entity tracking. Each version isolates one change.</p>
+  </div>
+  <div class="evo-timeline fade-in">
+    <div class="evo-item">
+      <h4>CPUFlow v1 &mdash; Minimal Scan</h4>
+      <p>compress&rarr;relu&rarr;gate&rarr;cumsum&rarr;expand. No norms, no position encoding, no FFN. Proved cumsum works but PPL 260.</p>
+      <div class="evo-metrics"><span>1.34M params</span> <span class="evo-val">PPL 260</span> <span>11K tok/s</span></div>
+    </div>
+    <div class="evo-item">
+      <h4>CPUFlow v2 &mdash; Stability</h4>
+      <p>Added PowerNorm, CumStepPos, FFN, FSP. NaN at step 1036 revealed that normalization choice matters.</p>
+      <div class="evo-metrics"><span>~2M params</span> <span class="evo-val">PPL 25.2</span> <span>5.7K tok/s</span></div>
+    </div>
+    <div class="evo-item">
+      <h4>CPUFlow v3 &mdash; Linear Attention Cumsum</h4>
+      <p>q&middot;cumsum(kv)/cumsum(k). First stable CPU-native model. Bidirectional v4 failed (leaks future).</p>
+      <div class="evo-metrics"><span>1.99M params</span> <span class="evo-val">PPL 25.00</span> <span>6.1K tok/s</span></div>
+    </div>
+    <div class="evo-item">
+      <h4>CPUFlow v5-PN &mdash; Fused Projection + PowerNorm</h4>
+      <p>Fused Q/K/V (one matmul instead of three). NaN at step 1020. PowerNorm was 57% of compute.</p>
+      <div class="evo-metrics"><span>2.0M params</span> <span class="evo-val">PPL 28.59</span> <span>6.1K tok/s</span></div>
+    </div>
+    <div class="evo-item best">
+      <h4>CPUFlow v5-LN &mdash; LayerNorm Breakthrough</h4>
+      <p>PowerNorm &rarr; LayerNorm (MKL fused kernel, 27x faster). Zero NaN over 6,886 steps. More steps = better PPL.</p>
+      <div class="evo-metrics"><span>2.0M params</span> <span class="evo-val">PPL 11.94</span> <span>7.8K tok/s</span> <span>0 NaN</span></div>
+    </div>
+    <div class="evo-item">
+      <h4>CPUFlow v7 &mdash; Soft Memory Bank (failed)</h4>
+      <p>32-slot content-addressable memory. Cold start: gates collapsed (stayed at 0.12). Warm start: gates opened but softmax still blended across slots.</p>
+      <div class="evo-metrics"><span>2.26M params</span> <span class="evo-val">PPL 13.72 (warm)</span> <span>5.8K tok/s</span></div>
+    </div>
+    <div class="evo-item current">
+      <h4>CPUFlow v8 &mdash; Discrete State Streams (running)</h4>
+      <p>Hard argmax routing + straight-through estimator. Each token routes to exactly one slot. No blending across entities.</p>
+      <div class="evo-metrics"><span>2.2M params</span> <span class="evo-val">pending</span> <span>5.7K tok/s</span></div>
     </div>
   </div>
 </section>
@@ -331,28 +482,48 @@ L2: <span class="num">256 KB</span> (4 ns)      L2: <span class="num" style="col
   <div class="section-header fade-in">
     <div class="accent"></div>
     <h2>Key Findings</h2>
-    <p>What we learned from 30+ experiments and 21 failed attempts.</p>
+    <p>What 35+ experiments taught us about CPU-native language modeling.</p>
   </div>
   <div class="findings-grid fade-in">
     <div class="finding">
-      <div class="f-header"><div class="f-num blue">01</div><h4>Objective &gt; Architecture</h4></div>
-      <p>Future Sentence Prediction improved perplexity 2.5&times; with only 1.7% parameter overhead. All 21 architecture-only changes failed to match this gain.</p>
+      <div class="f-header"><div class="f-num blue">01</div><h4>Loss &gt; Architecture</h4></div>
+      <p>Future Sentence Prediction improved PPL 2.5&times; with 1.7% parameter overhead. All 21 architecture-only changes failed to match this gain.</p>
       <div class="metric-inline">FSP: 10.24 PPL vs baseline: 25.08 PPL</div>
     </div>
     <div class="finding">
-      <div class="f-header"><div class="f-num green">02</div><h4>Sequential &gt; Parallel (on CPU)</h4></div>
-      <p>CumMix replaces O(n&sup2;) attention with O(n) cumulative sum. The CPU prefetcher handles sequential scans natively, avoiding the memory bottleneck of attention.</p>
-      <div class="metric-inline">89 &mu;s vs 2,062 &mu;s per layer</div>
+      <div class="f-header"><div class="f-num green">02</div><h4>PPL Is Misleading</h4></div>
+      <p>Even PPL 1.36 (29.7M params, 40h training) produces incoherent text. No FlashLM model achieves narrative coherence. PPL measures token prediction, not logical consistency.</p>
+      <div class="metric-inline">v5: PPL 1.36, still incoherent</div>
     </div>
     <div class="finding">
-      <div class="f-header"><div class="f-num purple">03</div><h4>Stripping &ne; Designing</h4></div>
-      <p>CPUFlow v1 stripped all GPU components and got PPL 329. Adding stability (PowerNorm, FFN) in v2 got to PPL 25.2 but NaN'd at step 1036. v3's linear attention cumsum fixed NaN with only 1 recovery in 1200+ steps.</p>
-      <div class="metric-inline">v1: PPL 329 &rarr; v2: PPL 25.2 &rarr; v3: PPL 25.45, stable</div>
+      <div class="f-header"><div class="f-num purple">03</div><h4>Operation Speed &gt; Cleverness</h4></div>
+      <p>PowerNorm (learned exponent) was 57% of compute. LayerNorm (MKL fused kernel) is 27x faster. More steps per second beats better per-step learning.</p>
+      <div class="metric-inline">v5-PN: NaN at step 1020 vs v5-LN: 0 NaN in 6,886 steps</div>
     </div>
     <div class="finding">
-      <div class="f-header"><div class="f-num amber">04</div><h4>Scale Is the Ceiling</h4></div>
-      <p>Our only coherent model required 29.7M params and 40 hours. Below ~10M, models learn vocabulary and syntax but lack narrative state capacity for coherent stories.</p>
-      <div class="metric-inline">PPL 1.36 @ 29.7M params</div>
+      <div class="f-header"><div class="f-num amber">04</div><h4>C++ Kernels &lt; PyTorch MKL</h4></div>
+      <p>Custom AVX2 fused scan kernel ran at 0.54x speed of pure PyTorch. MKL-optimized matmuls and vectorized ops are hard to beat with hand-written kernels.</p>
+      <div class="metric-inline">Custom C++: 0.54x PyTorch speed</div>
+    </div>
+    <div class="finding">
+      <div class="f-header"><div class="f-num green">05</div><h4>FFN Is Load-Bearing</h4></div>
+      <p>Removing FFN saves 18% compute but doubles PPL (11.94&rarr;22.75). The per-position nonlinear transformation is essential.</p>
+      <div class="metric-inline">NoFFN: PPL 22.75 vs full: PPL 11.94</div>
+    </div>
+    <div class="finding">
+      <div class="f-header"><div class="f-num red">06</div><h4>Soft Blending Fails Entity Tracking</h4></div>
+      <p>v7's 32-slot memory bank failed twice: gates collapsed on cold start, and even with open gates, softmax blending mixed entity properties. Discrete selection is necessary.</p>
+      <div class="metric-inline">v7 warm: PPL 13.72 (worse than 11.94 baseline)</div>
+    </div>
+    <div class="finding">
+      <div class="f-header"><div class="f-num blue">07</div><h4>97% Dispatch Overhead</h4></div>
+      <p>On CPU, PyTorch dispatch overhead dominates over actual compute. CPUFlow minimizes operations from 233 to ~50, giving 2x real throughput improvement.</p>
+      <div class="metric-inline">3% compute, 97% dispatch overhead</div>
+    </div>
+    <div class="finding">
+      <div class="f-header"><div class="f-num purple">08</div><h4>Multi-Token Kills CPU Speed</h4></div>
+      <p>Output projections (D&rarr;vocab &times; 4) dominate at 8.6G FLOPs vs 1.2G for the model. Caused 2.7x slowdown and PPL 181 on CPU.</p>
+      <div class="metric-inline">Multi-token: PPL 181, FSP: PPL 10.24</div>
     </div>
   </div>
 </section>
@@ -362,33 +533,40 @@ L2: <span class="num">256 KB</span> (4 ns)      L2: <span class="num" style="col
   <div class="section-header fade-in">
     <div class="accent"></div>
     <h2>Generated Samples</h2>
-    <p>What CPUFlow v3 produces at 1.99M parameters, PPL 25.45.</p>
+    <p>CPUFlow v5-LN at 2.0M parameters, PPL 11.94. Named characters and sentence structure, but incoherent on close reading.</p>
   </div>
   <div class="fade-in">
     <div class="sample">
       <div class="prompt"><span class="arrow">&rarr;</span> Once upon a time</div>
-      <div class="text">Once upon a time, there was a little boy named Tom. Bob loved to play with a big park. One day, Sam had a big dog named Sue. The cat was very happy. Tim was very happy and he loved to play.</div>
-      <div class="meta"><span>CPUFlow v3 &middot; 1.99M params &middot; PPL 25.45</span></div>
+      <div class="text">Once upon a time, there was a little girl named Lily. She loved to collect the world around the forest. One day, while playing outside, she heard a noise. It was pretty and a small bush. Lily was curious. She wondered what was, so she had to see the fog. She ran to the cave and opened it and inside. She reached the door and saw a little bird. The bird was happy! Lily and Doggy became friends.</div>
+      <div class="meta"><span>CPUFlow v5-LN &middot; 2.0M params &middot; PPL 11.94</span></div>
     </div>
     <div class="sample">
-      <div class="prompt"><span class="arrow">&rarr;</span> A cat sat</div>
-      <div class="text">A cat sat on the ball and wanted to be good place. Tim and Tim loved to the game. Tim and his mom went to eat the park. Tim and Tim and the park, Tim was very happy and they had a good time.</div>
-      <div class="meta"><span>CPUFlow v3 &middot; 1.99M params &middot; PPL 25.45</span></div>
+      <div class="prompt"><span class="arrow">&rarr;</span> A boy named</div>
+      <div class="text">A boy named Tim was playing with her ball. The cat liked to play with Tim. Tim wanted to help his toy too. Tim went up and saw a big ball. The ball was very fast. Tim was sad and wanted to help. He went to the dog, but he did not see the dog.</div>
+      <div class="meta"><span>CPUFlow v5-LN &middot; 2.0M params &middot; PPL 11.94 &middot; Note: "her ball" &mdash; pronoun resolution failure</span></div>
     </div>
   </div>
-  <p style="color:var(--text3);font-size:13px;margin-top:20px;font-style:italic">Vocabulary and sentence structure are learned. Narrative coherence requires &gt;10M parameters.</p>
+  <div class="honest-box fade-in" style="margin-top:24px">
+    <h3>Failure Analysis</h3>
+    <p><strong>"She loved to collect the world around the forest"</strong> &mdash; Property transfer. "World" is not collectible. The model blended Lily's hobby with a setting from another context.</p>
+    <p><strong>"Tim was playing with her ball"</strong> &mdash; Pronoun resolution failure. "Her" refers to a female character, but only Tim (male) has been introduced. The model's entity state is a blended vector, not discrete records.</p>
+    <p><strong>"The ball was very fast. Tim was sad"</strong> &mdash; Causal incoherence. No logical connection between these propositions. The model samples "Tim was sad" because it's statistically common after events, not because it's causally implied.</p>
+    <p>These failures stem from <strong>continuous state blending</strong> &mdash; cumsum and softmax averaging mix entity properties into an undifferentiated soup. v8's discrete routing is designed to fix this.</p>
+  </div>
 </section>
 
 <!-- CTA -->
 <div class="cta">
   <h2>Use It. Build On It.</h2>
-  <p>Everything is open source under MIT license.</p>
+  <p>Everything is open source under MIT license. 35+ experiments, including failures.</p>
   <div class="buttons">
     <a href="https://github.com/changcheng967/FlashLM" class="btn btn-primary">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       View on GitHub
     </a>
     <a href="https://doi.org/10.5281/zenodo.20113960" class="btn btn-ghost">Read the Paper</a>
+    <a href="https://github.com/changcheng967/FlashLM/blob/main/DEVLOG.md" class="btn btn-ghost">Development Log</a>
   </div>
 </div>
 
