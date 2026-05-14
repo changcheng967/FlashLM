@@ -81,6 +81,8 @@ Named characters and sentence-level structure, but falls apart on close reading 
 | v4 | Multi-stream bidirectional cumsum | 2.0M | 3,200 tok/s | 311 | Wrong: bidirectional leaks future in LM |
 | v5-PN | Fused Q/K/V + PowerNorm + ReLU FFN | 2.0M | 6,100 tok/s | 28.59 | Fused projection, NaN at step 1020 |
 | **v5-LN** | **Fused Q/K/V + LayerNorm + ReLU FFN** | **2.0M** | **7,833 tok/s** | **11.94** | **LayerNorm 27x faster, zero NaN** |
+| v7 warm | v5-LN + soft memory bank | 2.26M | 5,800 tok/s | 13.72 | Softmax blending — gates open but still blends |
+| v8 discrete | Hard argmax routing + STE | 2.21M | pending | pending | Discrete entity streams, no blending |
 
 ### Key architectural lessons
 
@@ -106,6 +108,8 @@ Named characters and sentence-level structure, but falls apart on close reading 
 | v4 | Ternary Bolt (community, 48t/7h) | 4.3M | varies | 15.05 | Partial |
 | v11 v3 | CumMix + FSP | 3.66M | 2h | 32.21 | Partial |
 | v5-LN NoFFN | v5-LN minus FFN | 1.6M | 1h | 22.75 | No |
+| CPUFlow v7 warm | v5-LN + soft memory bank (warm-start) | 2.26M | 2h | 13.72 | No |
+| CPUFlow v7 | Soft memory bank (cold start) | 2.26M | 2h | 19.73 | No |
 | v6 decay+multi | Decay cumsum + multi-token | 2.0M | 2h | 181 | No |
 
 ---
@@ -120,6 +124,7 @@ Named characters and sentence-level structure, but falls apart on close reading 
 6. **Custom C++ kernels are slower than PyTorch MKL.** Fused scan kernel in C++/AVX2 ran at 0.54x speed of pure PyTorch. MKL-optimized matmuls and vectorized ops are hard to beat with hand-written kernels.
 7. **FFN is load-bearing.** Removing FFN saves 18% compute but doubles PPL (11.94→22.75). Not worth it.
 8. **Multi-token prediction kills CPU training speed.** Output projections (D→vocab × 4) dominate compute at 8.6G FLOPs vs 1.2G for the model forward pass, causing 2.7x slowdown and PPL 181.
+9. **Soft memory banks collapse or blend.** v7's 32-slot content-addressable memory failed twice: cold-start gates stayed closed (0.12), warm-start gates opened but softmax still blended across slots — PPL 13.72 above baseline. Entity tracking requires discrete selection, not weighted averaging.
 
 ---
 
@@ -135,6 +140,7 @@ CPUFlow is NOT a transformer adaptation. It's designed FROM SCRATCH around what 
 | Feed-forward | SwiGLU (3 matmuls) | ReLU FFN (2 matmuls) |
 | Projection | Separate Q/K/V | Fused Q/K/V (1 matmul) |
 | Training signal | Cross-entropy only | CE + FSP (future planning) |
+| Entity tracking | KV cache (GPU memory) | Discrete argmax routing (CPU branch predictor) |
 
 Every operation is a large contiguous matmul (MKL-optimized) or a sequential scan (cumsum). No small kernels, no custom loops, no dispatch-heavy operations.
 
@@ -145,6 +151,9 @@ Every operation is a large contiguous matmul (MKL-optimized) or a sequential sca
 ```
 v10/
     train_cpuflow_v5_ln.py        CPUFlow v5-LN (current best, PPL 11.94)
+    train_cpuflow_v8_discrete.py  CPUFlow v8 (discrete state streams, pending)
+    train_cpuflow_v7_memory_warm.py CPUFlow v7 warm-start (PPL 13.72)
+    train_cpuflow_v7_memory.py    CPUFlow v7 cold-start (PPL 19.73, gate collapse)
     train_cpuflow_v5.py           CPUFlow v5 (PowerNorm variant, PPL 28.59)
     train_cpuflow_v6_decay.py     CPUFlow v6 (learned decay cumsum, pending)
     train_cpuflow_v5_ln_noffn.py  NoFFN ablation (PPL 22.75, FFN is load-bearing)
@@ -153,10 +162,6 @@ v10/
     train_v11_cummix.py           v11 CumMix (PPL 32.21)
     train_v10_fsp.py              v10 FSP (completed)
     bench_profile.py              Operation-level profiling
-    bench_quant.py                int8 quantization benchmark
-    scan_kernel.cpp               C++ fused scan kernel (0.54x PyTorch speed)
-    setup_scan.py                 Build script for C++ kernel
-    fused_scan.py                 Python autograd wrapper for C++ kernel
     data_v10/                     TinyStories V2-GPT4, vocab=4096
 docs/
     index.html                    GitHub Pages website
