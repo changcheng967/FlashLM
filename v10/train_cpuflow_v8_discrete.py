@@ -188,7 +188,7 @@ class CPUFlowV8(nn.Module):
         loss = 0.0
         for block in self.blocks:
             with torch.no_grad():
-                q = torch.randn(4, SEQ_LEN, M_SLOTS) @ block.W_route.weight.T
+                q = torch.randn(4, SEQ_LEN, D) @ block.W_route.weight.T
                 hard = F.one_hot(q.argmax(dim=-1), M_SLOTS).float()
             slot_frac = hard.mean(dim=1)  # [B, M]
             loss = loss + ((slot_frac - 1.0 / M_SLOTS) ** 2).mean()
@@ -199,7 +199,7 @@ class CPUFlowV8(nn.Module):
         entropies = []
         for block in self.blocks:
             # Use real data stats (approximate with random input)
-            q = torch.randn(4, SEQ_LEN, M_SLOTS) @ block.W_route.weight.T
+            q = torch.randn(4, SEQ_LEN, D) @ block.W_route.weight.T
             hard = F.one_hot(q.argmax(dim=-1), M_SLOTS).float()
             slot_frac = hard.mean(dim=(0, 1))  # [M] fraction per slot
             # Entropy of slot distribution (max = log(M))
@@ -382,7 +382,7 @@ def train(args):
 
     print(f"\n--- Routing Analysis ---")
     for i, block in enumerate(model.blocks):
-        q = torch.randn(4, SEQ_LEN, M_SLOTS) @ block.W_route.weight.T
+        q = torch.randn(4, SEQ_LEN, D) @ block.W_route.weight.T
         hard = F.one_hot(q.argmax(dim=-1), M_SLOTS).float()
         slot_frac = hard.mean(dim=(0, 1))
         top_slots = slot_frac.topk(5)
