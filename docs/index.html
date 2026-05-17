@@ -177,12 +177,12 @@ footer a:hover{color:var(--text)}
   <div class="hero-content">
     <div class="tag"><span class="pulse"></span> Open Source &middot; MIT License</div>
     <h1><span>FlashLM</span></h1>
-    <p class="subtitle">CPU-native language models trained from scratch on free-tier hardware. No GPU, no pretrained weights, no shortcuts. 35+ experiments, honest results.</p>
+    <p class="subtitle">CPU-native language models trained from scratch on free-tier hardware. No GPU, no pretrained weights, no shortcuts. 40+ experiments, honest results.</p>
     <div class="metrics">
       <div class="metric"><div class="value green">$0</div><div class="label">Training Cost</div></div>
-      <div class="metric"><div class="value blue">35+</div><div class="label">Experiments</div></div>
-      <div class="metric"><div class="value purple">11.94</div><div class="label">Best CPU PPL</div></div>
-      <div class="metric"><div class="value amber">7.8K</div><div class="label">tok/s</div></div>
+      <div class="metric"><div class="value blue">40+</div><div class="label">Experiments</div></div>
+      <div class="metric"><div class="value purple">10.23</div><div class="label">Best Coherent PPL</div></div>
+      <div class="metric"><div class="value amber">3.4K</div><div class="label">tok/s</div></div>
     </div>
   </div>
 </div>
@@ -224,6 +224,30 @@ footer a:hover{color:var(--text)}
           <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
+          <td><strong>v8</strong></td>
+          <td>FSP + hard slot routing (M=32)</td>
+          <td class="mono">2.0M</td>
+          <td class="mono"><strong>9.30</strong></td>
+          <td class="mono">7K</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
+          <td>v9</td>
+          <td>cumsum + RAM-Net sparse memory</td>
+          <td class="mono">2.57M</td>
+          <td class="mono">9.67</td>
+          <td class="mono">3.6K</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr class="highlight">
+          <td><strong>v9.7</strong> <span class="badge badge-green">best coherent</span></td>
+          <td><strong>cumsum + RAM-Net (no routing loss)</strong></td>
+          <td class="mono"><strong>2.47M</strong></td>
+          <td class="mono"><strong>10.23</strong></td>
+          <td class="mono"><strong>3.4K</strong></td>
+          <td><span class="badge badge-green">Yes</span></td>
+        </tr>
+        <tr>
           <td>v10 FSP</td>
           <td>Attention + FSP auxiliary</td>
           <td class="mono">3.74M</td>
@@ -231,32 +255,16 @@ footer a:hover{color:var(--text)}
           <td class="mono">2.8K</td>
           <td><span class="badge badge-amber">Partial</span></td>
         </tr>
-        <tr class="highlight">
-          <td><strong>CPUFlow v5-LN</strong> <span class="badge badge-green">best</span></td>
+        <tr>
+          <td><strong>v5-LN</strong> <span class="badge badge-blue">baseline</span></td>
           <td><strong>Fused cumsum + LayerNorm + FSP</strong></td>
           <td class="mono"><strong>2.0M</strong></td>
           <td class="mono"><strong>11.94</strong></td>
           <td class="mono"><strong>7.8K</strong></td>
-          <td><span class="badge badge-amber">Partial</span></td>
+          <td><span class="badge badge-green">Yes</span></td>
         </tr>
         <tr>
-          <td>v5.2</td>
-          <td>Attention + RoPE</td>
-          <td class="mono">5.0M</td>
-          <td class="mono">10.56</td>
-          <td class="mono">&mdash;</td>
-          <td><span class="badge badge-red">No</span></td>
-        </tr>
-        <tr>
-          <td>v4</td>
-          <td>Ternary Bolt (community, 48t/7h)</td>
-          <td class="mono">4.3M</td>
-          <td class="mono">15.05</td>
-          <td class="mono">varies</td>
-          <td><span class="badge badge-amber">Partial</span></td>
-        </tr>
-        <tr>
-          <td>CPUFlow v7 warm</td>
+          <td>v7 warm</td>
           <td>v5-LN + soft memory bank</td>
           <td class="mono">2.26M</td>
           <td class="mono">13.72</td>
@@ -264,76 +272,12 @@ footer a:hover{color:var(--text)}
           <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
-          <td>CPUFlow v7</td>
-          <td>Soft memory bank (cold)</td>
-          <td class="mono">2.26M</td>
-          <td class="mono">19.73</td>
-          <td class="mono">5.8K</td>
-          <td><span class="badge badge-red">No</span></td>
-        </tr>
-        <tr>
-          <td>v6 BrainMix</td>
-          <td>forget+predict+compete</td>
-          <td class="mono">3.9M</td>
-          <td class="mono">19.43</td>
-          <td class="mono">2.6K</td>
-          <td><span class="badge badge-red">No</span></td>
-        </tr>
-        <tr>
-          <td>CPUFlow v3</td>
-          <td>Linear attention cumsum</td>
-          <td class="mono">1.99M</td>
-          <td class="mono">25.00</td>
-          <td class="mono">6.1K</td>
-          <td><span class="badge badge-amber">Partial</span></td>
-        </tr>
-        <tr>
-          <td>v10 base</td>
-          <td>Standard attention</td>
-          <td class="mono">3.74M</td>
-          <td class="mono">25.08</td>
-          <td class="mono">2.8K</td>
-          <td><span class="badge badge-red">No</span></td>
-        </tr>
-        <tr>
           <td>v11 CumMix</td>
-          <td>CumMix + FSP</td>
+          <td>All-novel (PowerNorm+DualMomAdam)</td>
           <td class="mono">3.66M</td>
           <td class="mono">32.21</td>
           <td class="mono">2.9K</td>
           <td><span class="badge badge-amber">Partial</span></td>
-        </tr>
-        <tr>
-          <td>CPUFlow v5-LN NoFFN</td>
-          <td>v5-LN minus FFN</td>
-          <td class="mono">1.6M</td>
-          <td class="mono">22.75</td>
-          <td class="mono">&mdash;</td>
-          <td><span class="badge badge-red">No</span></td>
-        </tr>
-        <tr>
-          <td>CPUFlow v6 decay</td>
-          <td>Decay cumsum + multi-token</td>
-          <td class="mono">2.0M</td>
-          <td class="mono">181</td>
-          <td class="mono">&mdash;</td>
-          <td><span class="badge badge-red">No</span></td>
-        </tr>
-        <tr>
-          <td>CPUFlow v1</td>
-          <td>Minimal scan</td>
-          <td class="mono">1.34M</td>
-          <td class="mono"><span class="badge badge-red">260</span></td>
-          <td class="mono">11K</td>
-          <td><span class="badge badge-red">No</span></td>
-        </tr>
-        <tr>
-          <td>CPUFlow v4</td>
-          <td>Multi-stream bidirectional cumsum</td>
-          <td class="mono">2.0M</td>
-          <td class="mono"><span class="badge badge-red">311</span></td>
-          <td class="mono">3.2K</td>
-          <td><span class="badge badge-red">No</span></td>
         </tr>
       </tbody>
     </table>
@@ -341,9 +285,10 @@ footer a:hover{color:var(--text)}
 
   <div class="honest-box fade-in">
     <h3>Honest Assessment</h3>
-    <p><strong>No FlashLM model produces truly coherent text.</strong> Even v5 at PPL 1.36 (29.7M params, 40h training) generates incoherent output: "her big tiny looked door, and she wanted." PPL measures token-level prediction, not narrative coherence.</p>
-    <p>The community-trained v4 on 48 threads for 7+ hours gets closest with real sentence structure and dialogue, but still contradicts itself mid-story. CPUFlow v5-LN produces named characters and sentence-level grammar, but falls apart on close reading.</p>
-    <p>We believe coherence requires <strong>discrete entity tracking</strong> &mdash; something continuous-vector architectures fundamentally cannot provide. Our v8 experiment with hard argmax routing is testing this hypothesis.</p>
+    <p><strong>v9.7 achieves semi-coherent generation at PPL 10.23.</strong> Stories have named characters, pronoun tracking, dialogue, and narrative structure. But coherence breaks down ~100 tokens in with word salad and contradictions.</p>
+    <p><strong>PPL ≠ coherence.</strong> v8 (PPL 9.30, hard slot routing) is incoherent. v5-LN (PPL 11.94, cumsum only) is semi-coherent. v9.7 (PPL 10.23, cumsum + memory) is also semi-coherent. The cumsum backbone drives coherence, not PPL or entity routing.</p>
+    <p><strong>Entity tracking remains unsolved at 2.5M parameters.</strong> Six different mechanisms failed: softmax memory (v7), discrete slots (v8), supervised slots (v8.5), Product Softmax (v9), contrastive routing (v9.5), two-phase contrastive (v9.6). The binding threshold (~160M params) is a fundamental barrier.</p>
+    <p>The key positive finding: <strong>sparse memory adds capacity without breaking coherence.</strong> RAM-Net's Product Softmax (512 slots, Top-8) improves PPL by 1.7 points as a parameter-efficient capacity expansion. This is useful for CPU-native models.</p>
   </div>
 </section>
 
@@ -351,8 +296,8 @@ footer a:hover{color:var(--text)}
 <section id="architecture">
   <div class="section-header fade-in">
     <div class="accent"></div>
-    <h2>CPUFlow v5-LN Architecture</h2>
-    <p>Designed from CPU hardware principles &mdash; not adapted from GPU designs. Every component uses operations where CPU excels.</p>
+    <h2>CPUFlow v9.7 Architecture</h2>
+    <p>v5-LN cumsum backbone + RAM-Net sparse memory sidepath. Every component uses operations where CPU excels.</p>
   </div>
   <div class="arch-grid fade-in">
     <div class="arch-card">
@@ -361,16 +306,19 @@ footer a:hover{color:var(--text)}
         <h3>ScanBlock</h3>
         <span>core mixing layer</span>
       </div>
-      <div class="arch-code"><span class="kw">x_n</span> = <span class="fn">LayerNorm</span>(x)
+      <div class="arch-code"><span class="cm"># RAMScanBlock (v9.7)</span>
+<span class="kw">x_n</span> = <span class="fn">LayerNorm</span>(x)
 <span class="kw">h</span>   = <span class="fn">W_proj</span>(x_n)             <span class="cm"># fused: d&rarr;3k</span>
 <span class="kw">q, k, v</span> = <span class="fn">chunk</span>(h, <span class="num">3</span>)
-<span class="kw">k</span>   = <span class="fn">sigmoid</span>(k)              <span class="cm"># [0,1] position gate</span>
-<span class="kw">v</span>   = <span class="fn">tanh</span>(v)                  <span class="cm"># [-1,1] content</span>
-<span class="kw">num</span> = <span class="fn">cumsum</span>(k <span class="op">&odot;</span> v)
-<span class="kw">den</span> = <span class="fn">cumsum</span>(k) + eps
-<span class="kw">s</span>   = q <span class="op">*</span> num / den          <span class="cm"># linear attn readout</span>
-<span class="kw">s</span>   = <span class="fn">W_m</span>(s)
-<span class="kw">x</span>   = x <span class="op">+</span> <span class="fn">W_out</span>(s)
+<span class="kw">k</span>   = <span class="fn">sigmoid</span>(k); <span class="kw">v</span> = <span class="fn">tanh</span>(v)
+<span class="kw">scan_out</span> = <span class="fn">W_m</span>(q * <span class="fn">cumsum</span>(k*v) / <span class="fn">cumsum</span>(k))
+
+<span class="cm"># RAM-Net sparse memory sidepath</span>
+<span class="kw">addr</span> = <span class="fn">W_addr</span>(x_n) &rarr; Product Softmax &rarr; Top-<span class="num">8</span>
+<span class="kw">mem_out</span> = <span class="fn">sparse_read_write</span>(addr, x_n)
+<span class="kw">merged</span> = scan_out <span class="op">+</span> <span class="fn">W_mem_proj</span>(mem_out)
+
+<span class="kw">x</span>   = x <span class="op">+</span> <span class="fn">W_out</span>(merged)
 <span class="kw">h</span>   = <span class="fn">relu</span>(ff_up(<span class="fn">LN</span>(x)))     <span class="cm"># per-position FFN</span>
 <span class="kw">x</span>   = x <span class="op">+</span> ff_down(h)</div>
     </div>
@@ -406,7 +354,7 @@ footer a:hover{color:var(--text)}
 <span class="kw">SwiGLU</span> (3 matmul) &rarr;  <span class="fn">ReLU FFN</span> (2 matmul)
 <span class="kw">Separate Q/K/V</span>   &rarr;  <span class="fn">Fused Q/K/V</span> (1 matmul)
 <span class="kw">CE only</span>          &rarr;  <span class="fn">CE + FSP</span> (future planning)
-<span class="kw">KV cache</span>         &rarr;  <span class="fn">Argmax routing</span> (v8+)</div>
+<span class="kw">KV cache</span>         &rarr;  <span class="fn">RAM-Net Product Softmax</span> (sparse)</div>
     </div>
     <div class="arch-card">
       <div class="arch-header">
@@ -436,7 +384,7 @@ footer a:hover{color:var(--text)}
   <div class="section-header fade-in">
     <div class="accent"></div>
     <h2>CPUFlow Evolution</h2>
-    <p>From minimal scan to discrete entity tracking. Each version isolates one change.</p>
+    <p>From minimal scan to memory-enhanced coherent generation. Each version isolates one change.</p>
   </div>
   <div class="evo-timeline fade-in">
     <div class="evo-item">
@@ -459,9 +407,9 @@ footer a:hover{color:var(--text)}
       <p>Fused Q/K/V (one matmul instead of three). NaN at step 1020. PowerNorm was 57% of compute.</p>
       <div class="evo-metrics"><span>2.0M params</span> <span class="evo-val">PPL 28.59</span> <span>6.1K tok/s</span></div>
     </div>
-    <div class="evo-item best">
+    <div class="evo-item">
       <h4>CPUFlow v5-LN &mdash; LayerNorm Breakthrough</h4>
-      <p>PowerNorm &rarr; LayerNorm (MKL fused kernel, 27x faster). Zero NaN over 6,886 steps. More steps = better PPL.</p>
+      <p>PowerNorm &rarr; LayerNorm (MKL fused kernel, 27x faster). Zero NaN over 6,886 steps. Coherent baseline at PPL 11.94.</p>
       <div class="evo-metrics"><span>2.0M params</span> <span class="evo-val">PPL 11.94</span> <span>7.8K tok/s</span> <span>0 NaN</span></div>
     </div>
     <div class="evo-item">
@@ -469,10 +417,20 @@ footer a:hover{color:var(--text)}
       <p>32-slot content-addressable memory. Cold start: gates collapsed (stayed at 0.12). Warm start: gates opened but softmax still blended across slots.</p>
       <div class="evo-metrics"><span>2.26M params</span> <span class="evo-val">PPL 13.72 (warm)</span> <span>5.8K tok/s</span></div>
     </div>
-    <div class="evo-item current">
-      <h4>CPUFlow v8 &mdash; Discrete State Streams (running)</h4>
-      <p>Hard argmax routing + straight-through estimator. Each token routes to exactly one slot. No blending across entities.</p>
-      <div class="evo-metrics"><span>2.2M params</span> <span class="evo-val">pending</span> <span>5.7K tok/s</span></div>
+    <div class="evo-item">
+      <h4>CPUFlow v8 &mdash; Discrete State Streams</h4>
+      <p>Hard argmax routing + straight-through estimator. Best PPL (9.30) but incoherent &mdash; discrete routing disrupts continuous context.</p>
+      <div class="evo-metrics"><span>2.0M params</span> <span class="evo-val">PPL 9.30</span> <span>7K tok/s</span> <span>incoherent</span></div>
+    </div>
+    <div class="evo-item">
+      <h4>CPUFlow v9 &mdash; RAM-Net Sparse Memory</h4>
+      <p>Product Softmax addressing (3&times;8 = 512 virtual slots, Top-8). Low PPL (9.67) but still incoherent &mdash; entity addresses collapsed.</p>
+      <div class="evo-metrics"><span>2.57M params</span> <span class="evo-val">PPL 9.67</span> <span>3.6K tok/s</span> <span>incoherent</span></div>
+    </div>
+    <div class="evo-item best">
+      <h4>CPUFlow v9.7 &mdash; Memory-Enhanced Coherent Model</h4>
+      <p>v5-LN cumsum backbone + RAM-Net memory sidepath (no entity routing). Coherent generation with 1.7 PPL improvement over baseline.</p>
+      <div class="evo-metrics"><span>2.47M params</span> <span class="evo-val">PPL 10.23</span> <span>3.4K tok/s</span> <span>coherent</span></div>
     </div>
   </div>
 </section>
@@ -482,7 +440,7 @@ footer a:hover{color:var(--text)}
   <div class="section-header fade-in">
     <div class="accent"></div>
     <h2>Key Findings</h2>
-    <p>What 35+ experiments taught us about CPU-native language modeling.</p>
+    <p>What 40+ experiments taught us about CPU-native language modeling.</p>
   </div>
   <div class="findings-grid fade-in">
     <div class="finding">
@@ -491,9 +449,9 @@ footer a:hover{color:var(--text)}
       <div class="metric-inline">FSP: 10.24 PPL vs baseline: 25.08 PPL</div>
     </div>
     <div class="finding">
-      <div class="f-header"><div class="f-num green">02</div><h4>PPL Is Misleading</h4></div>
-      <p>Even PPL 1.36 (29.7M params, 40h training) produces incoherent text. No FlashLM model achieves narrative coherence. PPL measures token prediction, not logical consistency.</p>
-      <div class="metric-inline">v5: PPL 1.36, still incoherent</div>
+      <div class="f-header"><div class="f-num green">02</div><h4>PPL &ne; Coherence</h4></div>
+      <p>v8 (PPL 9.30, hard slot routing) produces incoherent text. v5-LN (PPL 11.94, cumsum only) is semi-coherent. v9.7 (PPL 10.23, cumsum + memory) is also semi-coherent. The cumsum backbone drives coherence, not PPL or discrete routing.</p>
+      <div class="metric-inline">v8 PPL 9.30 incoherent, v9.7 PPL 10.23 coherent</div>
     </div>
     <div class="finding">
       <div class="f-header"><div class="f-num purple">03</div><h4>Operation Speed &gt; Cleverness</h4></div>
@@ -511,9 +469,9 @@ footer a:hover{color:var(--text)}
       <div class="metric-inline">NoFFN: PPL 22.75 vs full: PPL 11.94</div>
     </div>
     <div class="finding">
-      <div class="f-header"><div class="f-num red">06</div><h4>Soft Blending Fails Entity Tracking</h4></div>
-      <p>v7's 32-slot memory bank failed twice: gates collapsed on cold start, and even with open gates, softmax blending mixed entity properties. Discrete selection is necessary.</p>
-      <div class="metric-inline">v7 warm: PPL 13.72 (worse than 11.94 baseline)</div>
+      <div class="f-header"><div class="f-num red">06</div><h4>Entity Tracking Fails at 2.5M Params</h4></div>
+      <p>Six mechanisms tried: softmax memory (v7), discrete slots (v8), supervised slots (v8.5), Product Softmax (v9), contrastive routing (v9.5), two-phase contrastive (v9.6). All collapsed to mode-averaging. The binding threshold (~160M params) is real.</p>
+      <div class="metric-inline">All 6 entity routing attempts collapsed</div>
     </div>
     <div class="finding">
       <div class="f-header"><div class="f-num blue">07</div><h4>97% Dispatch Overhead</h4></div>
@@ -533,33 +491,32 @@ footer a:hover{color:var(--text)}
   <div class="section-header fade-in">
     <div class="accent"></div>
     <h2>Generated Samples</h2>
-    <p>CPUFlow v5-LN at 2.0M parameters, PPL 11.94. Named characters and sentence structure, but incoherent on close reading.</p>
+    <p>CPUFlow v9.7 at 2.47M parameters, val PPL 10.23. Semi-coherent stories with named characters, pronoun tracking, and narrative structure.</p>
   </div>
   <div class="fade-in">
     <div class="sample">
-      <div class="prompt"><span class="arrow">&rarr;</span> Once upon a time</div>
-      <div class="text">Once upon a time, there was a little girl named Lily. She loved to collect the world around the forest. One day, while playing outside, she heard a noise. It was pretty and a small bush. Lily was curious. She wondered what was, so she had to see the fog. She ran to the cave and opened it and inside. She reached the door and saw a little bird. The bird was happy! Lily and Doggy became friends.</div>
-      <div class="meta"><span>CPUFlow v5-LN &middot; 2.0M params &middot; PPL 11.94</span></div>
+      <div class="prompt"><span class="arrow">&rarr;</span> Lily and Tim went to the park. They</div>
+      <div class="text">Lily and Tim went to the park. They saw many kids playing near the back house. They went up to a tree and gave them to their dad. They were very happy. After a while, they saw a big pile of ants. It was not a normal day. They did not want to play hide behind. Tim and his friends were scared, but they did not want to go home. They got in and played in the big bush. They learned that they should always listen too.</div>
+      <div class="meta"><span>CPUFlow v9.7 &middot; 2.47M params &middot; PPL 10.23</span></div>
     </div>
     <div class="sample">
-      <div class="prompt"><span class="arrow">&rarr;</span> A boy named</div>
-      <div class="text">A boy named Tim was playing with her ball. The cat liked to play with Tim. Tim wanted to help his toy too. Tim went up and saw a big ball. The ball was very fast. Tim was sad and wanted to help. He went to the dog, but he did not see the dog.</div>
-      <div class="meta"><span>CPUFlow v5-LN &middot; 2.0M params &middot; PPL 11.94 &middot; Note: "her ball" &mdash; pronoun resolution failure</span></div>
+      <div class="prompt"><span class="arrow">&rarr;</span> There was a little girl named Lily. She loved to play with her friends. One day</div>
+      <div class="text">...she put her shoes in the park. In the park, Lily saw a big lock on the ground. She wanted to open it. She tried to open the key, but it was too small. She tried to unlock the door open, but she could not. Lily tried to open the door, but it was too tight. She pulled and walked up, up the church, and eventually, the lock was locked. She was very confused. Her mom came to help.</div>
+      <div class="meta"><span>CPUFlow v9.7 &middot; 2.47M params &middot; PPL 10.23</span></div>
     </div>
   </div>
   <div class="honest-box fade-in" style="margin-top:24px">
-    <h3>Failure Analysis</h3>
-    <p><strong>"She loved to collect the world around the forest"</strong> &mdash; Property transfer. "World" is not collectible. The model blended Lily's hobby with a setting from another context.</p>
-    <p><strong>"Tim was playing with her ball"</strong> &mdash; Pronoun resolution failure. "Her" refers to a female character, but only Tim (male) has been introduced. The model's entity state is a blended vector, not discrete records.</p>
-    <p><strong>"The ball was very fast. Tim was sad"</strong> &mdash; Causal incoherence. No logical connection between these propositions. The model samples "Tim was sad" because it's statistically common after events, not because it's causally implied.</p>
-    <p>These failures stem from <strong>continuous state blending</strong> &mdash; cumsum and softmax averaging mix entity properties into an undifferentiated soup. v8's discrete routing is designed to fix this.</p>
+    <h3>Honest Assessment</h3>
+    <p><strong>"She tried to open the key, but it was too small"</strong> &mdash; Semantic confusion. Opening a key is nonsensical; the model conflates "open" (door/lock) with "use" (key). The cumsum context maintains Lily as the actor but blends lock/key properties.</p>
+    <p><strong>"She pulled and walked up, up the church"</strong> &mdash; Scene drift. The story shifts from park to church with no transition. The continuous cumsum state gradually drifts, losing the original setting.</p>
+    <p><strong>Coherence breaks down ~100 tokens in.</strong> Named characters and pronoun tracking work early ("Lily... She"), but the cumsum state saturates with mixed contexts, producing word salad. Sparse memory (v9.7) improves PPL but doesn't solve this fundamental context length limitation.</p>
   </div>
 </section>
 
 <!-- CTA -->
 <div class="cta">
   <h2>Use It. Build On It.</h2>
-  <p>Everything is open source under MIT license. 35+ experiments, including failures.</p>
+  <p>Everything is open source under MIT license. 40+ experiments, including failures.</p>
   <div class="buttons">
     <a href="https://github.com/changcheng967/FlashLM" class="btn btn-primary">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>

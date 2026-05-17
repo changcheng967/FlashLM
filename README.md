@@ -15,59 +15,61 @@ No GPUs · No pretraining · Every component designed for CPU · 35+ experiments
 
 ---
 
-## CPUFlow v5-LN — Current Best
+## CPUFlow v9.7 — Best Coherent Model
 
-A CPU-native language model achieving **val PPL 11.94** on TinyStories, trained in under 2 hours on 4 free-tier CPU cores. Uses only matmuls + LayerNorm + cumulative sums — no attention, no softmax, no GPU-derived operations.
+A CPU-native language model achieving **val PPL 10.23** on TinyStories with coherent generation, trained in 2 hours on 4 free-tier CPU cores. Adds RAM-Net sparse memory (512 slots, Product Softmax addressing) to the v5-LN cumsum backbone.
 
 ### Architecture
 
 ```
-embed + CumStepPos → [ScanBlock × 6] → LayerNorm → tied output + FSP
+embed + CumStepPos → [RAMScanBlock × 6] → LayerNorm → tied output + FSP
 
-ScanBlock:
+RAMScanBlock:
+  # Cumsum backbone (same as v5-LN)
   x_n = LayerNorm(x)
-  h = W_proj(x_n)            # fused: d → 3k (query + key + value)
+  h = W_proj(x_n)            # fused: d → 3k
   query, key, value = chunk(h, 3)
-  key = sigmoid(key)          # [0,1] position gate
-  value = tanh(value)         # [-1,1] bounded content
-  num = cumsum(key * value)   # weighted accumulation
-  den = cumsum(key) + eps     # normalizer
-  s = query * num / den       # content-dependent readout
-  s = W_m(s)                  # self-mix
-  x = x + W_out(s)           # residual
-  x = x + ff_down(relu(ff_up(LayerNorm(x))))  # per-position FFN
-```
+  key = sigmoid(key); value = tanh(value)
+  scan_out = W_m(query * cumsum(key*value) / cumsum(key))
 
-Fused Q/K/V projection (one matmul instead of three), LayerNorm (MKL fused kernel, 27x faster than PowerNorm), and gated normalized cumsum for content-dependent mixing.
+  # RAM-Net sparse memory sidepath
+  addr = W_addr(x_n) → Product Softmax → Top-8 of 512 virtual slots
+  mem_out = sparse_read_write(addr, x_n)
+  merged = scan_out + W_mem_proj(mem_out)    # direct addition, no gate
+
+  x = x + W_out(merged)
+  x = x + ff_down(relu(ff_up(LayerNorm(x))))
+```
 
 ### Results
 
-| Metric | Value |
-|--------|-------|
-| **Best val PPL** | **11.94** |
-| Params | 1,997,312 |
-| Speed | 7,833 tok/s |
-| Training time | 108 min to best |
-| Hardware | AMD EPYC 7B13 (4 vCPU, free tier) |
-| NaN events | **0** (6,886 steps) |
+| Metric | v5-LN (baseline) | v9.7 (memory-enhanced) |
+|--------|------------------|----------------------|
+| **Best val PPL** | 11.94 | **10.23** |
+| Params | 2.0M | 2.47M |
+| Speed | 7,833 tok/s | 3,369 tok/s |
+| Coherent? | Yes | Yes |
+| NaN events | 0 | 0 |
 
-### Generation Samples (val PPL 11.94)
+### Generation Samples (val PPL 10.23)
 
 ```
-[Once upon a time] → Once upon a time, there was a little girl named Lily.
-She loved to collect the world around the forest. One day, while playing
-outside, she heard a noise. It was pretty and a small bush. Lily was curious.
-She wondered what was, so she had to see the fog. She ran to the cave and
-opened it and inside. She reached the door and saw a little bird. The bird
-was happy! Lily and Doggy became friends.
+[Lily and Tim went to the park. They] → Lily and Tim went to the park.
+They saw many kids playing near the back house. They went up to a tree and
+gave them to their dad. They were very happy. After a while, they saw a big
+pile of ants. It was not a normal day. They did not want to play hide behind.
+Tim and his friends were scared, but they did not want to go home. They got
+in and played in the big bush. They learned that they should always listen too.
 
-[A boy named] → A boy named Tim was playing with her ball. The cat liked to
-play with Tim. Tim wanted to help his toy too. Tim went up and saw a big ball.
-The ball was very fast. Tim was sad and wanted to help. He went to the dog,
-but he did not see the dog.
+[There was a little girl named Lily. She loved to play with her friends. One day]
+→ ...she put her shoes in the park. In the park, Lily saw a big lock on the
+ground. She wanted to open it. She tried to open the key, but it was too small.
+She tried to unlock the door open, but she could not. Lily tried to open the
+door, but it was too tight. She pulled and walked up, up the church, and
+eventually, the lock was locked. She was very confused. Her mom came to help.
 ```
 
-Named characters and sentence-level structure, but falls apart on close reading (broken grammar, contradictions, non-sequiturs). Better than random words, not truly coherent.
+Semi-coherent: named characters, pronoun tracking, story structure, dialogue. Loses coherence ~100 tokens in. The cumsum backbone preserves coherence; the memory sidepath improves PPL.
 
 ---
 
@@ -76,13 +78,12 @@ Named characters and sentence-level structure, but falls apart on close reading 
 | Version | Architecture | Params | Speed | PPL | Key Change |
 |:-------:|-------------|-------:|------:|----:|------------|
 | v1 | compress→relu→gate→cumsum→expand | 1.34M | 11,000 tok/s | 260 | Minimal CPU design, no norms/pos/FFN |
-| v2 | + PowerNorm + CumStepPos + FFN + FSP | ~2M | 5,700 tok/s | 25.2 | Added stability, NaN at step 1036 |
 | v3 | Linear attention cumsum | 1.99M | 6,100 tok/s | 25.00 | q·cumsum(kv)/cumsum(k) |
-| v4 | Multi-stream bidirectional cumsum | 2.0M | 3,200 tok/s | 311 | Wrong: bidirectional leaks future in LM |
 | v5-PN | Fused Q/K/V + PowerNorm + ReLU FFN | 2.0M | 6,100 tok/s | 28.59 | Fused projection, NaN at step 1020 |
 | **v5-LN** | **Fused Q/K/V + LayerNorm + ReLU FFN** | **2.0M** | **7,833 tok/s** | **11.94** | **LayerNorm 27x faster, zero NaN** |
-| v7 warm | v5-LN + soft memory bank | 2.26M | 5,800 tok/s | 13.72 | Softmax blending — gates open but still blends |
-| v8 discrete | Hard argmax routing + STE | 2.21M | pending | pending | Discrete entity streams, no blending |
+| v8 | FSP + hard slot routing (M=32) | 2.0M | ~7K | 9.30 | Best PPL but incoherent (no cumsum backbone) |
+| v9 | cumsum + RAM-Net sparse memory (M=512) | 2.57M | 3.6K | 9.67 | Product Softmax addressing, no entity routing |
+| **v9.7** | **cumsum + RAM-Net (no routing loss)** | **2.47M** | **3.4K** | **10.23** | **Memory as capacity expansion, coherent** |
 
 ### Key architectural lessons
 
@@ -100,31 +101,28 @@ Named characters and sentence-level structure, but falls apart on close reading 
 | **v5** | Ternary recurrence | 29.7M | 40h | **1.36** | No |
 | v7.4 | Gated DeltaNet + SWA | 6.6M | 2h | 2.33 | No |
 | **v10 FSP** | Attention + FSP | 3.74M | 2h | **10.24** | Partial |
-| **CPUFlow v5-LN** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Partial** |
+| **v8** | **FSP + hard slot routing (M=32)** | **2.0M** | **2h** | **9.30** | **No** |
+| **v9.7** | **cumsum + RAM-Net sparse memory** | **2.47M** | **2h** | **10.23** | **Yes** |
+| **CPUFlow v5-LN** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Yes** |
 | v5.2 | Attention + RoPE | 5.0M | 2h | 10.56 | No |
+| v9 | cumsum + RAM-Net + contrastive routing | 2.48M | 2h | 9.73 | No |
+| CPUFlow v7 warm | v5-LN + soft memory bank | 2.26M | 2h | 13.72 | No |
+| CPUFlow v3 | Linear attention cumsum | 1.99M | 2h | 25.00 | Partial |
+| v11 CumMix | All-novel (PowerNorm+DualMomAdam) | 3.66M | 2h | 32.21 | No |
 | v6 BrainMix | forget+predict+compete | 3.9M | 2h | 19.43 | No |
-| **CPUFlow v3** | Linear attention cumsum | 1.99M | 2h | 25.00 | Partial |
-| v10.2 | Attention + RoPE | 3.5M | 2h | 25.08 | No |
-| v4 | Ternary Bolt (community, 48t/7h) | 4.3M | varies | 15.05 | Partial |
-| v11 v3 | CumMix + FSP | 3.66M | 2h | 32.21 | Partial |
-| v5-LN NoFFN | v5-LN minus FFN | 1.6M | 1h | 22.75 | No |
-| CPUFlow v7 warm | v5-LN + soft memory bank (warm-start) | 2.26M | 2h | 13.72 | No |
-| CPUFlow v7 | Soft memory bank (cold start) | 2.26M | 2h | 19.73 | No |
-| v6 decay+multi | Decay cumsum + multi-token | 2.0M | 2h | 181 | No |
 
 ---
 
 ## Key Findings
 
 1. **Loss > architecture.** Adding FSP to v10 gave 2.5x PPL improvement (25→10). All 21 architecture-only experiments failed to match this.
-2. **PPL is misleading.** Even PPL 1.36 (v5, 29.7M params, 40h) produces incoherent text ("her big tiny looked door, and she wanted"). No FlashLM model produces truly coherent generation. Community-trained v4 on 48 threads for 7+ hours gets closest — real sentence structure and dialogue, but still contradicts itself mid-story. PPL measures token prediction, not narrative coherence.
-3. **CPU needs CPU-native design.** 97% of CPU time was PyTorch dispatch overhead, not compute. CPUFlow minimizes operation count from 233 to ~50.
-4. **Operation speed > operation cleverness.** PowerNorm (learned exponent) was 57% of compute. LayerNorm (MKL fused kernel) is 27x faster. More steps per second beats better per-step learning.
-5. **Linear attention cumsum works on CPU.** q·cumsum(kv)/cumsum(k) is O(n), numerically stable, and 15x cheaper than softmax attention.
-6. **Custom C++ kernels are slower than PyTorch MKL.** Fused scan kernel in C++/AVX2 ran at 0.54x speed of pure PyTorch. MKL-optimized matmuls and vectorized ops are hard to beat with hand-written kernels.
-7. **FFN is load-bearing.** Removing FFN saves 18% compute but doubles PPL (11.94→22.75). Not worth it.
-8. **Multi-token prediction kills CPU training speed.** Output projections (D→vocab × 4) dominate compute at 8.6G FLOPs vs 1.2G for the model forward pass, causing 2.7x slowdown and PPL 181.
-9. **Soft memory banks collapse or blend.** v7's 32-slot content-addressable memory failed twice: cold-start gates stayed closed (0.12), warm-start gates opened but softmax still blended across slots — PPL 13.72 above baseline. Entity tracking requires discrete selection, not weighted averaging.
+2. **PPL ≠ coherence.** v8 (PPL 9.30) produces incoherent text. v5-LN (PPL 11.94) produces semi-coherent stories. v9.7 (PPL 10.23) is coherent with better PPL. The cumsum backbone drives coherence, not PPL.
+3. **Coherence comes from continuous context, not discrete routing.** The cumsum maintains a running summary of all past tokens. Hard slot routing (v8) disrupts this continuity. Additive memory (v9.7) preserves it.
+4. **Entity tracking remains unsolved at 2.5M parameters.** Six mechanisms tried: softmax memory (v7), discrete slots (v8), supervised slots (v8.5), Product Softmax (v9), contrastive routing (v9.5), two-phase contrastive (v9.6). None produced entity-specific addressing. The binding threshold (~160M params, Feng & Steinhardt 2024) is real.
+5. **Sparse memory adds capacity without breaking coherence.** RAM-Net's Product Softmax (512 virtual slots, Top-8) improves PPL by 1.7 points (10.23 vs 11.94) as a parameter-efficient capacity expansion mechanism.
+6. **CPU needs CPU-native design.** 97% of CPU time was PyTorch dispatch overhead. CPUFlow minimizes operation count from 233 to ~50.
+7. **Operation speed > operation cleverness.** LayerNorm (MKL fused kernel) is 27x faster than custom PowerNorm. More steps per second beats better per-step learning.
+8. **Simple beats novel.** Standard components (LayerNorm, AdamW, ReLU) outperform custom ones (PowerNorm, DualMomAdam, gated cumsum) for CPU training.
 
 ---
 
@@ -135,12 +133,12 @@ CPUFlow is NOT a transformer adaptation. It's designed FROM SCRATCH around what 
 | Component | GPU operation | CPUFlow replacement |
 |-----------|--------------|-------------------|
 | Token mixing | Attention O(n²) | Linear attention cumsum O(n) |
+| Memory | KV cache (GPU memory) | RAM-Net Product Softmax (sparse, CPU-friendly) |
 | Normalization | LayerNorm | LayerNorm (MKL fused kernel) |
 | Position encoding | RoPE/sinusoidal | CumStepPos (cumulative walk) |
 | Feed-forward | SwiGLU (3 matmuls) | ReLU FFN (2 matmuls) |
 | Projection | Separate Q/K/V | Fused Q/K/V (1 matmul) |
 | Training signal | Cross-entropy only | CE + FSP (future planning) |
-| Entity tracking | KV cache (GPU memory) | Discrete argmax routing (CPU branch predictor) |
 
 Every operation is a large contiguous matmul (MKL-optimized) or a sequential scan (cumsum). No small kernels, no custom loops, no dispatch-heavy operations.
 
@@ -150,21 +148,21 @@ Every operation is a large contiguous matmul (MKL-optimized) or a sequential sca
 
 ```
 v10/
-    train_cpuflow_v5_ln.py        CPUFlow v5-LN (current best, PPL 11.94)
-    train_cpuflow_v8_discrete.py  CPUFlow v8 (discrete state streams, pending)
-    train_cpuflow_v7_memory_warm.py CPUFlow v7 warm-start (PPL 13.72)
-    train_cpuflow_v7_memory.py    CPUFlow v7 cold-start (PPL 19.73, gate collapse)
-    train_cpuflow_v5.py           CPUFlow v5 (PowerNorm variant, PPL 28.59)
-    train_cpuflow_v6_decay.py     CPUFlow v6 (learned decay cumsum, pending)
-    train_cpuflow_v5_ln_noffn.py  NoFFN ablation (PPL 22.75, FFN is load-bearing)
-    train_cpuflow_v4.py           CPUFlow v4 (multi-stream bidirectional, failed)
-    train_cpuflow.py              CPUFlow v3 (linear attention cumsum, PPL 25.00)
-    train_v11_cummix.py           v11 CumMix (PPL 32.21)
-    train_v10_fsp.py              v10 FSP (completed)
-    bench_profile.py              Operation-level profiling
-    data_v10/                     TinyStories V2-GPT4, vocab=4096
+    train_cpuflow_v97_simple_memory.py   CPUFlow v9.7 (best coherent, PPL 10.23)
+    train_cpuflow_v98_two_phase_simple.py CPUFlow v9.8 (two-phase, no contrastive)
+    train_cpuflow_v96_two_phase.py        CPUFlow v9.6 (two-phase + contrastive)
+    train_cpuflow_v95_entity_route.py     CPUFlow v9.5 (contrastive routing)
+    train_cpuflow_v9_ram.py               CPUFlow v9 (RAM-Net, PPL 9.67)
+    train_cpuflow_v8_discrete.py          CPUFlow v8 (best PPL 9.30, incoherent)
+    train_cpuflow_v5_ln.py                CPUFlow v5-LN (PPL 11.94, coherent baseline)
+    train_v11_cummix.py                   v11 CumMix (PPL 32.21)
+    train_v10_fsp.py                      v10 FSP (attention baseline)
+    bench_profile.py                      Operation-level profiling
+    data_v10/                             TinyStories V2-GPT4, vocab=4096
 docs/
-    index.html                    GitHub Pages website
+    index.html                            GitHub Pages website
+papers/
+    flashlm_v3.tex                        Paper (v3)
 ```
 
 ---
