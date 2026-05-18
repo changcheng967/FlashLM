@@ -181,7 +181,7 @@ footer a:hover{color:var(--text)}
     <div class="metrics">
       <div class="metric"><div class="value green">$0</div><div class="label">Training Cost</div></div>
       <div class="metric"><div class="value blue">40+</div><div class="label">Experiments</div></div>
-      <div class="metric"><div class="value purple">10.23</div><div class="label">Best Coherent PPL</div></div>
+      <div class="metric"><div class="value purple">10.23</div><div class="label">Best Semi-Coherent PPL</div></div>
       <div class="metric"><div class="value amber">3.4K</div><div class="label">tok/s</div></div>
     </div>
   </div>
@@ -272,13 +272,13 @@ footer a:hover{color:var(--text)}
           <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr class="highlight">
-          <td><strong>v9.7</strong> <span class="badge badge-green">best coherent</span></td>
+          <td><strong>v9.7</strong> <span class="badge badge-green">best semi-coherent</span></td>
           <td><strong>CPUFlow</strong></td>
           <td><strong>cumsum + RAM-Net (no routing loss)</strong></td>
           <td class="mono"><strong>2.47M</strong></td>
           <td class="mono"><strong>10.23</strong></td>
           <td class="mono"><strong>3.4K</strong></td>
-          <td><span class="badge badge-green">Yes</span></td>
+          <td><span class="badge badge-amber">Semi</span></td>
         </tr>
         <tr>
           <td><strong>v5-LN</strong> <span class="badge badge-blue">baseline</span></td>
@@ -287,7 +287,7 @@ footer a:hover{color:var(--text)}
           <td class="mono"><strong>2.0M</strong></td>
           <td class="mono"><strong>11.94</strong></td>
           <td class="mono"><strong>7.8K</strong></td>
-          <td><span class="badge badge-green">Yes</span></td>
+          <td><span class="badge badge-amber">Semi</span></td>
         </tr>
         <tr>
           <td>v9</td>
@@ -322,8 +322,8 @@ footer a:hover{color:var(--text)}
 
   <div class="honest-box fade-in">
     <h3>Honest Assessment</h3>
-    <p><strong>v9.7 achieves semi-coherent generation at PPL 10.23.</strong> Stories have named characters, pronoun tracking, dialogue, and narrative structure. But coherence breaks down ~100 tokens in with word salad and contradictions.</p>
-    <p><strong>PPL ≠ coherence.</strong> v8 (PPL 9.30, hard slot routing) is incoherent. v5-LN (PPL 11.94, cumsum only) is semi-coherent. v9.7 (PPL 10.23, cumsum + memory) is also semi-coherent. The cumsum backbone drives coherence, not PPL or entity routing.</p>
+    <p><strong>v9.7 achieves semi-coherent generation at PPL 10.23.</strong> Stories have named characters, pronoun tracking, dialogue, and narrative structure. But coherence breaks down ~100 tokens in with word salad and contradictions. No FlashLM model achieves true coherence.</p>
+    <p><strong>PPL ≠ coherence.</strong> v8 (PPL 9.30, hard slot routing) is incoherent. v5-LN (PPL 11.94, cumsum only) is semi-coherent. v9.7 (PPL 10.23, cumsum + memory) is also semi-coherent. The cumsum backbone helps but does not solve coherence. Neither model produces logically consistent stories.</p>
     <p><strong>Entity tracking remains unsolved at 2.5M parameters.</strong> Six different mechanisms failed: softmax memory (v7), discrete slots (v8), supervised slots (v8.5), Product Softmax (v9), contrastive routing (v9.5), two-phase contrastive (v9.6). The binding threshold (~160M params) is a fundamental barrier.</p>
     <p>The key positive finding: <strong>sparse memory adds capacity without breaking coherence.</strong> RAM-Net's Product Softmax (512 slots, Top-8) improves PPL by 1.7 points as a parameter-efficient capacity expansion. This is useful for CPU-native models.</p>
   </div>
@@ -334,7 +334,7 @@ footer a:hover{color:var(--text)}
   <div class="section-header fade-in">
     <div class="accent"></div>
     <h2>CPUFlow v9.7 Architecture</h2>
-    <p>v5-LN cumsum backbone + RAM-Net sparse memory sidepath. Every component uses operations where CPU excels.</p>
+    <p>v5-LN cumsum backbone + RAM-Net sparse memory sidepath. Semi-coherent generation at PPL 10.23. Every component uses operations where CPU excels.</p>
   </div>
   <div class="arch-grid fade-in">
     <div class="arch-card">
@@ -465,9 +465,9 @@ footer a:hover{color:var(--text)}
       <div class="evo-metrics"><span>2.57M params</span> <span class="evo-val">PPL 9.67</span> <span>3.6K tok/s</span> <span>incoherent</span></div>
     </div>
     <div class="evo-item best">
-      <h4>CPUFlow v9.7 &mdash; Memory-Enhanced Coherent Model</h4>
-      <p>v5-LN cumsum backbone + RAM-Net memory sidepath (no entity routing). Coherent generation with 1.7 PPL improvement over baseline.</p>
-      <div class="evo-metrics"><span>2.47M params</span> <span class="evo-val">PPL 10.23</span> <span>3.4K tok/s</span> <span>coherent</span></div>
+      <h4>CPUFlow v9.7 &mdash; Memory-Enhanced Semi-Coherent Model</h4>
+      <p>v5-LN cumsum backbone + RAM-Net memory sidepath (no entity routing). Semi-coherent generation with 1.7 PPL improvement over baseline. Loses coherence ~100 tokens in.</p>
+      <div class="evo-metrics"><span>2.47M params</span> <span class="evo-val">PPL 10.23</span> <span>3.4K tok/s</span> <span>semi-coherent</span></div>
     </div>
   </div>
 </section>
@@ -487,8 +487,8 @@ footer a:hover{color:var(--text)}
     </div>
     <div class="finding">
       <div class="f-header"><div class="f-num green">02</div><h4>PPL &ne; Coherence</h4></div>
-      <p>v8 (PPL 9.30, hard slot routing) produces incoherent text. v5-LN (PPL 11.94, cumsum only) is semi-coherent. v9.7 (PPL 10.23, cumsum + memory) is also semi-coherent. The cumsum backbone drives coherence, not PPL or discrete routing.</p>
-      <div class="metric-inline">v8 PPL 9.30 incoherent, v9.7 PPL 10.23 coherent</div>
+      <p>v8 (PPL 9.30, hard slot routing) produces incoherent text. v5-LN (PPL 11.94, cumsum only) is semi-coherent. v9.7 (PPL 10.23, cumsum + memory) is also semi-coherent. Neither achieves true coherence. The cumsum backbone helps but does not solve it.</p>
+      <div class="metric-inline">v8 PPL 9.30 incoherent, v9.7 PPL 10.23 semi-coherent</div>
     </div>
     <div class="finding">
       <div class="f-header"><div class="f-num purple">03</div><h4>Operation Speed &gt; Cleverness</h4></div>
@@ -528,7 +528,7 @@ footer a:hover{color:var(--text)}
   <div class="section-header fade-in">
     <div class="accent"></div>
     <h2>Generated Samples</h2>
-    <p>CPUFlow v9.7 at 2.47M parameters, val PPL 10.23. Semi-coherent stories with named characters, pronoun tracking, and narrative structure.</p>
+    <p>CPUFlow v9.7 at 2.47M parameters, val PPL 10.23. Semi-coherent stories — named characters and pronoun tracking work, but coherence breaks down ~100 tokens in.</p>
   </div>
   <div class="fade-in">
     <div class="sample">
@@ -546,7 +546,7 @@ footer a:hover{color:var(--text)}
     <h3>Honest Assessment</h3>
     <p><strong>"She tried to open the key, but it was too small"</strong> &mdash; Semantic confusion. Opening a key is nonsensical; the model conflates "open" (door/lock) with "use" (key). The cumsum context maintains Lily as the actor but blends lock/key properties.</p>
     <p><strong>"She pulled and walked up, up the church"</strong> &mdash; Scene drift. The story shifts from park to church with no transition. The continuous cumsum state gradually drifts, losing the original setting.</p>
-    <p><strong>Coherence breaks down ~100 tokens in.</strong> Named characters and pronoun tracking work early ("Lily... She"), but the cumsum state saturates with mixed contexts, producing word salad. Sparse memory (v9.7) improves PPL but doesn't solve this fundamental context length limitation.</p>
+    <p><strong>Coherence breaks down ~100 tokens in.</strong> Named characters and pronoun tracking work early ("Lily... She"), but the cumsum state saturates with mixed contexts, producing word salad. No FlashLM model achieves true coherence. Sparse memory (v9.7) improves PPL but doesn't solve this.</p>
   </div>
 </section>
 

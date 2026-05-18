@@ -15,9 +15,9 @@ No GPUs · No pretraining · Every component designed for CPU · 35+ experiments
 
 ---
 
-## CPUFlow v9.7 — Best Coherent Model
+## CPUFlow v9.7 — Best Semi-Coherent Model
 
-A CPU-native language model achieving **val PPL 10.23** on TinyStories with coherent generation, trained in 2 hours on 4 free-tier CPU cores. Adds RAM-Net sparse memory (512 slots, Product Softmax addressing) to the v5-LN cumsum backbone.
+A CPU-native language model achieving **val PPL 10.23** on TinyStories with semi-coherent generation, trained in 2 hours on 4 free-tier CPU cores. Adds RAM-Net sparse memory (512 slots, Product Softmax addressing) to the v5-LN cumsum backbone. Stories have named characters, pronoun tracking, and narrative structure but lose coherence ~100 tokens in.
 
 ### Architecture
 
@@ -48,7 +48,7 @@ RAMScanBlock:
 | **Best val PPL** | 11.94 | **10.23** |
 | Params | 2.0M | 2.47M |
 | Speed | 7,833 tok/s | 3,369 tok/s |
-| Coherent? | Yes | Yes |
+| Coherent? | Semi | Semi |
 | NaN events | 0 | 0 |
 
 ### Generation Samples (val PPL 10.23)
@@ -107,8 +107,8 @@ Semi-coherent: named characters, pronoun tracking, story structure, dialogue. Lo
 | v11 CumMix | FlashLM | All-novel (PowerNorm+DualMomAdam) | 3.66M | 2h | 32.21 | No |
 | v6 BrainMix | FlashLM | forget+predict+compete | 3.9M | 2h | 19.43 | No |
 | **v8** | **CPUFlow** | **FSP + hard slot routing (M=32)** | **2.0M** | **2h** | **9.30** | **No** |
-| **v9.7** | **CPUFlow** | **cumsum + RAM-Net sparse memory** | **2.47M** | **2h** | **10.23** | **Yes** |
-| **v5-LN** | **CPUFlow** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Yes** |
+| **v9.7** | **CPUFlow** | **cumsum + RAM-Net sparse memory** | **2.47M** | **2h** | **10.23** | **Semi** |
+| **v5-LN** | **CPUFlow** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Semi** |
 | v9 | CPUFlow | cumsum + RAM-Net + contrastive routing | 2.48M | 2h | 9.73 | No |
 | v7 warm | CPUFlow | v5-LN + soft memory bank | 2.26M | 2h | 13.72 | No |
 | v3 | CPUFlow | Linear attention cumsum | 1.99M | 2h | 25.00 | Partial |
@@ -118,10 +118,10 @@ Semi-coherent: named characters, pronoun tracking, story structure, dialogue. Lo
 ## Key Findings
 
 1. **Loss > architecture.** Adding FSP to v10 gave 2.5x PPL improvement (25→10). All 21 architecture-only experiments failed to match this.
-2. **PPL ≠ coherence.** v8 (PPL 9.30) produces incoherent text. v5-LN (PPL 11.94) produces semi-coherent stories. v9.7 (PPL 10.23) is coherent with better PPL. The cumsum backbone drives coherence, not PPL.
+2. **PPL ≠ coherence.** v8 (PPL 9.30) produces incoherent text. v5-LN (PPL 11.94) produces semi-coherent stories. v9.7 (PPL 10.23) is also semi-coherent with better PPL. The cumsum backbone drives coherence, not PPL.
 3. **Coherence comes from continuous context, not discrete routing.** The cumsum maintains a running summary of all past tokens. Hard slot routing (v8) disrupts this continuity. Additive memory (v9.7) preserves it.
 4. **Entity tracking remains unsolved at 2.5M parameters.** Six mechanisms tried: softmax memory (v7), discrete slots (v8), supervised slots (v8.5), Product Softmax (v9), contrastive routing (v9.5), two-phase contrastive (v9.6). None produced entity-specific addressing. The binding threshold (~160M params, Feng & Steinhardt 2024) is real.
-5. **Sparse memory adds capacity without breaking coherence.** RAM-Net's Product Softmax (512 virtual slots, Top-8) improves PPL by 1.7 points (10.23 vs 11.94) as a parameter-efficient capacity expansion mechanism.
+5. **Sparse memory adds capacity without breaking coherence.** RAM-Net's Product Softmax (512 virtual slots, Top-8) improves PPL by 1.7 points (10.23 vs 11.94) as a parameter-efficient capacity expansion mechanism. Neither model achieves true coherence — both lose it ~100 tokens in.
 6. **CPU needs CPU-native design.** 97% of CPU time was PyTorch dispatch overhead. CPUFlow minimizes operation count from 233 to ~50.
 7. **Operation speed > operation cleverness.** LayerNorm (MKL fused kernel) is 27x faster than custom PowerNorm. More steps per second beats better per-step learning.
 8. **Simple beats novel.** Standard components (LayerNorm, AdamW, ReLU) outperform custom ones (PowerNorm, DualMomAdam, gated cumsum) for CPU training.
