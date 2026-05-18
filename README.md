@@ -96,20 +96,22 @@ Semi-coherent: named characters, pronoun tracking, story structure, dialogue. Lo
 
 ## All Results
 
-| Version | Architecture | Params | Time | PPL | Coherent? |
-|:-------:|-------------|-------:|-----:|----:|:---------:|
-| **v5** | Ternary recurrence | 29.7M | 40h | **1.36** | No |
-| v7.4 | Gated DeltaNet + SWA | 6.6M | 2h | 2.33 | No |
-| **v10 FSP** | Attention + FSP | 3.74M | 2h | **10.24** | Partial |
-| **v8** | **FSP + hard slot routing (M=32)** | **2.0M** | **2h** | **9.30** | **No** |
-| **v9.7** | **cumsum + RAM-Net sparse memory** | **2.47M** | **2h** | **10.23** | **Yes** |
-| **CPUFlow v5-LN** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Yes** |
-| v5.2 | Attention + RoPE | 5.0M | 2h | 10.56 | No |
-| v9 | cumsum + RAM-Net + contrastive routing | 2.48M | 2h | 9.73 | No |
-| CPUFlow v7 warm | v5-LN + soft memory bank | 2.26M | 2h | 13.72 | No |
-| CPUFlow v3 | Linear attention cumsum | 1.99M | 2h | 25.00 | Partial |
-| v11 CumMix | All-novel (PowerNorm+DualMomAdam) | 3.66M | 2h | 32.21 | No |
-| v6 BrainMix | forget+predict+compete | 3.9M | 2h | 19.43 | No |
+**CPUFlow** = cumsum-based CPU-native architecture. **FlashLM** = other architectures (attention, ternary, etc.).
+
+| Version | Series | Architecture | Params | Time | PPL | Coherent? |
+|:-------:|:------:|-------------|-------:|-----:|----:|:---------:|
+| **v5** | FlashLM | Ternary recurrence | 29.7M | 40h | **1.36** | No |
+| v7.4 | FlashLM | Gated DeltaNet + SWA | 6.6M | 2h | 2.33 | No |
+| **v10 FSP** | FlashLM | Attention + FSP | 3.74M | 2h | **10.24** | Partial |
+| v5.2 | FlashLM | Attention + RoPE | 5.0M | 2h | 10.56 | No |
+| v11 CumMix | FlashLM | All-novel (PowerNorm+DualMomAdam) | 3.66M | 2h | 32.21 | No |
+| v6 BrainMix | FlashLM | forget+predict+compete | 3.9M | 2h | 19.43 | No |
+| **v8** | **CPUFlow** | **FSP + hard slot routing (M=32)** | **2.0M** | **2h** | **9.30** | **No** |
+| **v9.7** | **CPUFlow** | **cumsum + RAM-Net sparse memory** | **2.47M** | **2h** | **10.23** | **Yes** |
+| **v5-LN** | **CPUFlow** | **Fused cumsum + LayerNorm + FSP** | **2.0M** | **2h** | **11.94** | **Yes** |
+| v9 | CPUFlow | cumsum + RAM-Net + contrastive routing | 2.48M | 2h | 9.73 | No |
+| v7 warm | CPUFlow | v5-LN + soft memory bank | 2.26M | 2h | 13.72 | No |
+| v3 | CPUFlow | Linear attention cumsum | 1.99M | 2h | 25.00 | Partial |
 
 ---
 

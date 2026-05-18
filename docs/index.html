@@ -199,6 +199,7 @@ footer a:hover{color:var(--text)}
       <thead>
         <tr>
           <th>Version</th>
+          <th>Series</th>
           <th>Architecture</th>
           <th>Params</th>
           <th>Val PPL</th>
@@ -209,6 +210,7 @@ footer a:hover{color:var(--text)}
       <tbody>
         <tr>
           <td><strong>v5</strong> <span class="badge badge-amber">40h</span></td>
+          <td>FlashLM</td>
           <td>Ternary recurrence</td>
           <td class="mono">29.7M</td>
           <td class="mono"><strong style="color:var(--green)">1.36</strong></td>
@@ -217,6 +219,7 @@ footer a:hover{color:var(--text)}
         </tr>
         <tr>
           <td>v7.4</td>
+          <td>FlashLM</td>
           <td>Gated DeltaNet + SWA</td>
           <td class="mono">6.6M</td>
           <td class="mono">2.33</td>
@@ -224,23 +227,53 @@ footer a:hover{color:var(--text)}
           <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
+          <td>v10 FSP</td>
+          <td>FlashLM</td>
+          <td>Attention + FSP</td>
+          <td class="mono">3.74M</td>
+          <td class="mono">10.24</td>
+          <td class="mono">2.8K</td>
+          <td><span class="badge badge-amber">Partial</span></td>
+        </tr>
+        <tr>
+          <td>v5.2</td>
+          <td>FlashLM</td>
+          <td>Attention + RoPE</td>
+          <td class="mono">5.0M</td>
+          <td class="mono">10.56</td>
+          <td class="mono">&mdash;</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
+          <td>v11 CumMix</td>
+          <td>FlashLM</td>
+          <td>All-novel (PowerNorm+DualMomAdam)</td>
+          <td class="mono">3.66M</td>
+          <td class="mono">32.21</td>
+          <td class="mono">2.9K</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
+          <td>v6</td>
+          <td>FlashLM</td>
+          <td>forget+predict+compete</td>
+          <td class="mono">3.9M</td>
+          <td class="mono">19.43</td>
+          <td class="mono">2.6K</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
           <td><strong>v8</strong></td>
+          <td><strong>CPUFlow</strong></td>
           <td>FSP + hard slot routing (M=32)</td>
           <td class="mono">2.0M</td>
           <td class="mono"><strong>9.30</strong></td>
           <td class="mono">7K</td>
           <td><span class="badge badge-red">No</span></td>
         </tr>
-        <tr>
-          <td>v9</td>
-          <td>cumsum + RAM-Net sparse memory</td>
-          <td class="mono">2.57M</td>
-          <td class="mono">9.67</td>
-          <td class="mono">3.6K</td>
-          <td><span class="badge badge-red">No</span></td>
-        </tr>
         <tr class="highlight">
           <td><strong>v9.7</strong> <span class="badge badge-green">best coherent</span></td>
+          <td><strong>CPUFlow</strong></td>
           <td><strong>cumsum + RAM-Net (no routing loss)</strong></td>
           <td class="mono"><strong>2.47M</strong></td>
           <td class="mono"><strong>10.23</strong></td>
@@ -248,15 +281,8 @@ footer a:hover{color:var(--text)}
           <td><span class="badge badge-green">Yes</span></td>
         </tr>
         <tr>
-          <td>v10 FSP</td>
-          <td>Attention + FSP auxiliary</td>
-          <td class="mono">3.74M</td>
-          <td class="mono">10.24</td>
-          <td class="mono">2.8K</td>
-          <td><span class="badge badge-amber">Partial</span></td>
-        </tr>
-        <tr>
           <td><strong>v5-LN</strong> <span class="badge badge-blue">baseline</span></td>
+          <td><strong>CPUFlow</strong></td>
           <td><strong>Fused cumsum + LayerNorm + FSP</strong></td>
           <td class="mono"><strong>2.0M</strong></td>
           <td class="mono"><strong>11.94</strong></td>
@@ -264,7 +290,17 @@ footer a:hover{color:var(--text)}
           <td><span class="badge badge-green">Yes</span></td>
         </tr>
         <tr>
+          <td>v9</td>
+          <td>CPUFlow</td>
+          <td>cumsum + RAM-Net + contrastive routing</td>
+          <td class="mono">2.48M</td>
+          <td class="mono">9.73</td>
+          <td class="mono">3.6K</td>
+          <td><span class="badge badge-red">No</span></td>
+        </tr>
+        <tr>
           <td>v7 warm</td>
+          <td>CPUFlow</td>
           <td>v5-LN + soft memory bank</td>
           <td class="mono">2.26M</td>
           <td class="mono">13.72</td>
@@ -272,11 +308,12 @@ footer a:hover{color:var(--text)}
           <td><span class="badge badge-red">No</span></td>
         </tr>
         <tr>
-          <td>v11 CumMix</td>
-          <td>All-novel (PowerNorm+DualMomAdam)</td>
-          <td class="mono">3.66M</td>
-          <td class="mono">32.21</td>
-          <td class="mono">2.9K</td>
+          <td>v3</td>
+          <td>CPUFlow</td>
+          <td>Linear attention cumsum</td>
+          <td class="mono">1.99M</td>
+          <td class="mono">25.00</td>
+          <td class="mono">6K</td>
           <td><span class="badge badge-amber">Partial</span></td>
         </tr>
       </tbody>
